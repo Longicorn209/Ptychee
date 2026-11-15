@@ -25,7 +25,7 @@ Current demonstration modules include:
 
 ## Installation
 ```bash
-git clone https://github.com/Longicorn209/Ptychee-Demo
+git clone https://github.com/Longicorn209/Ptychee
 
 cd Ptychee-Demo
 
