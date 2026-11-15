@@ -27,7 +27,7 @@ Current demonstration modules include:
 ```bash
 git clone https://github.com/Longicorn209/Ptychee
 
-cd Ptychee-Demo
+cd Ptychee
 
 pip install -r requirements.txt
 ```
