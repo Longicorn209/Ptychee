@@ -21,6 +21,7 @@ Current demonstration modules include:
 - Simple parallax reconstruction (tcBF)
 - Ptychographic reconstruction:<br>
     analytical WDD and SSB methods<br>
+    3D LINV methods (https://arxiv.org/abs/2610.15303)<br>
     iterative LSQML and ePIE methods
 
 ## Installation
