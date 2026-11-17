@@ -22,8 +22,7 @@ Current demonstration modules include:
 - Ptychographic reconstruction:<br>
     \* analytical WDD and SSB methods<br>
     \* 3D LINV methods (https://arxiv.org/abs/2610.15303)<br>
-    \* iterative LSQML and ePIE methods<br>
-        → with probe aberration fitting, scan position correction and adaptive propagater
+    \* iterative LSQML and ePIE methods → with probe aberration fitting, scan position correction and adaptive propagater
 
 ## Installation
 ```bash
