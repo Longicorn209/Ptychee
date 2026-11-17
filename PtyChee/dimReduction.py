@@ -114,7 +114,7 @@ def fast_hals_NMF(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, alph
     reg_H_l2 = alpha_H * N * (1 - l1_ratio)
 
     # Precompute ||X||_F^2 only once.
-    norm_X_sq = torch.zeros((), dtype=torch.float64)
+    norm_X_sq = torch.zeros((), dtype=torch.float32)
     for start in range(0, N, block_size):
         Xb = X_cpu[start:start + block_size]
         norm_X_sq += Xb.double().square().sum()
@@ -266,11 +266,11 @@ def PCA(data_4D, n_components, n_block=1, device='None', n_oversamples=10, n_pow
     # --------------------------------------------------
     # 1. Compute mean in blocks
     # --------------------------------------------------
-    mean = torch.zeros(M, dtype=torch.float64, device=dev)
+    mean = torch.zeros(M, dtype=torch.float32, device=dev)
 
     for start in range(0, N, block_size):
         end = min(start + block_size, N)
-        Xb = torch.as_tensor(X_np[start:end], dtype=torch.float64, device=dev)
+        Xb = torch.as_tensor(X_np[start:end], dtype=torch.float32, device=dev)
         mean += Xb.sum(dim=0)
 
     mean /= N
@@ -421,11 +421,11 @@ def fast_ICA(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, device='N
     # --------------------------------------------------
     # 1. Mean
     # --------------------------------------------------
-    mean = torch.zeros(M, dtype=torch.float64, device=dev)
+    mean = torch.zeros(M, dtype=torch.float32, device=dev)
 
     for start in range(0, N, block_size):
         end = min(start + block_size, N)
-        Xb = torch.as_tensor(X_np[start:end], dtype=torch.float64, device=dev)
+        Xb = torch.as_tensor(X_np[start:end], dtype=torch.float32, device=dev)
         mean += Xb.sum(dim=0)
 
     mean /= N
@@ -484,8 +484,8 @@ def fast_ICA(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, device='N
 
     Ub, S, Vh = torch.linalg.svd(B, full_matrices=False)
 
-    S = S[:K].to(torch.float64)
-    E = Vh[:K].T.contiguous().to(torch.float64)
+    S = S[:K].to(torch.float32)
+    E = Vh[:K].T.contiguous().to(torch.float32)
 
     eigvals = (S.square() / N).clamp_min(1e-12)
 
@@ -495,7 +495,7 @@ def fast_ICA(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, device='N
     # Whitened data: Z = U * sqrt(N).
     # This avoids an additional pass computing Xc @ whitening.
     Z = (Q @ Ub[:, :K]) * np.sqrt(N)
-    Z = Z.to(torch.float64)
+    Z = Z.to(torch.float32)
 
     explained_ratio = S.square().sum().item() / max(norm_X_sq, 1e-12)
 
@@ -506,7 +506,7 @@ def fast_ICA(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, device='N
     # --------------------------------------------------
     # 3. Symmetric FastICA fixed-point iteration
     # --------------------------------------------------
-    Q_ica, _ = torch.linalg.qr(torch.randn(K, K, dtype=torch.float64, device=dev), mode='reduced')
+    Q_ica, _ = torch.linalg.qr(torch.randn(K, K, dtype=torch.float32, device=dev), mode='reduced')
 
     converged = False
     iteration_count = 0
@@ -591,10 +591,10 @@ def fast_ICA(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, device='N
 #     # --------------------------------------------------
 #     # 1. Compute mean in blocks
 #     # --------------------------------------------------
-#     mean = torch.zeros(M, dtype=torch.float64, device=dev)
+#     mean = torch.zeros(M, dtype=torch.float32, device=dev)
 
 #     for start in range(0, N, block_size):
-#         Xb = torch.as_tensor(X_np[start:start + block_size], dtype=torch.float64, device=dev)
+#         Xb = torch.as_tensor(X_np[start:start + block_size], dtype=torch.float32, device=dev)
 #         mean += Xb.sum(dim=0)
 #     mean /= N
 
@@ -602,10 +602,10 @@ def fast_ICA(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, device='N
 #     # 2. Compute covariance matrix
 #     # C = Xc.T @ Xc / N
 #     # --------------------------------------------------
-#     C = torch.zeros((M, M), dtype=torch.float64, device=dev)
+#     C = torch.zeros((M, M), dtype=torch.float32, device=dev)
 
 #     for start in range(0, N, block_size):
-#         Xb = torch.as_tensor(X_np[start:start + block_size], dtype=torch.float64, device=dev)
+#         Xb = torch.as_tensor(X_np[start:start + block_size], dtype=torch.float32, device=dev)
 #         Xb = Xb - mean
 #         C += Xb.T @ Xb
 
@@ -682,18 +682,18 @@ def fast_ICA(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, device='N
 #     # --------------------------------------------------
 #     # 1. Mean and covariance
 #     # --------------------------------------------------
-#     mean = torch.zeros(M, dtype=torch.float64, device=dev)
+#     mean = torch.zeros(M, dtype=torch.float32, device=dev)
 
 #     for start in range(0, N, block_size):
-#         Xb = torch.as_tensor(X_np[start:start + block_size], dtype=torch.float64, device=dev)
+#         Xb = torch.as_tensor(X_np[start:start + block_size], dtype=torch.float32, device=dev)
 #         mean += Xb.sum(dim=0)
 
 #     mean /= N
 
-#     C = torch.zeros((M, M), dtype=torch.float64, device=dev)
+#     C = torch.zeros((M, M), dtype=torch.float32, device=dev)
 
 #     for start in range(0, N, block_size):
-#         Xb = torch.as_tensor(X_np[start:start + block_size], dtype=torch.float64, device=dev)
+#         Xb = torch.as_tensor(X_np[start:start + block_size], dtype=torch.float32, device=dev)
 #         Xb -= mean
 #         C += Xb.T @ Xb
 
@@ -719,18 +719,18 @@ def fast_ICA(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, device='N
 #     # --------------------------------------------------
 #     # 3. Whitened data, stored in sample space
 #     # --------------------------------------------------
-#     Z = torch.empty((N, K), dtype=torch.float64, device=dev)
+#     Z = torch.empty((N, K), dtype=torch.float32, device=dev)
 
 #     for start in range(0, N, block_size):
 #         end = min(start + block_size, N)
-#         Xb = torch.as_tensor(X_np[start:end], dtype=torch.float64, device=dev)
+#         Xb = torch.as_tensor(X_np[start:end], dtype=torch.float32, device=dev)
 #         Z[start:end] = (Xb - mean) @ whitening
 
 #     # --------------------------------------------------
 #     # 4. Symmetric FastICA fixed-point iteration
 #     # --------------------------------------------------
 #     torch.manual_seed(0)
-#     Q, _ = torch.linalg.qr(torch.randn(K, K, dtype=torch.float64, device=dev))
+#     Q, _ = torch.linalg.qr(torch.randn(K, K, dtype=torch.float32, device=dev))
 
 #     for iteration in range(iter_max):
 #         Y = Z @ Q.T
