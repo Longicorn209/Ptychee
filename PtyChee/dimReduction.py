@@ -117,7 +117,7 @@ def fast_hals_NMF(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, alph
     norm_X_sq = torch.zeros((), dtype=torch.float32)
     for start in range(0, N, block_size):
         Xb = X_cpu[start:start + block_size]
-        norm_X_sq += Xb.double().square().sum()
+        norm_X_sq += Xb.square().sum()
     norm_X_sq = norm_X_sq.item()
 
     err_list = []
@@ -173,8 +173,8 @@ def fast_hals_NMF(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, alph
         # ----------------------------------------------------
         A_final = W.T @ W
 
-        cross_term = torch.sum(P.double() * W.double())
-        model_norm_sq = torch.sum(A_final.double() * B.double())
+        cross_term = torch.sum(P * W)
+        model_norm_sq = torch.sum(A_final * B)
         residual_sq = max(norm_X_sq - 2.0 * cross_term.item() + model_norm_sq.item(), 0.0)
 
         err = np.sqrt(residual_sq / max(norm_X_sq, eps))
@@ -289,7 +289,7 @@ def PCA(data_4D, n_components, n_block=1, device='None', n_oversamples=10, n_pow
         Xb = torch.as_tensor(X_np[start:end], dtype=torch.float32, device=dev)
         Xc = Xb - mean32
         Y[start:end] = Xc @ Omega
-        total_variance += Xc.double().square().sum().item()
+        total_variance += Xc.square().sum().item()
 
     Q, _ = torch.linalg.qr(Y, mode='reduced')
 
@@ -336,10 +336,10 @@ def PCA(data_4D, n_components, n_block=1, device='None', n_oversamples=10, n_pow
     H = Vh[:K].contiguous()
 
     # Eigenvalues of covariance matrix C = Xc.T @ Xc / N
-    eigvals = S.double().square() / N
+    eigvals = S.square() / N
     Lambda = torch.diag(eigvals)
 
-    explained_ratio = S.double().square().sum().item() / max(total_variance, 1e-12)
+    explained_ratio = S.square().sum().item() / max(total_variance, 1e-12)
 
     # --------------------------------------------------
     # 5. Compute spatial scores in blocks
@@ -447,7 +447,7 @@ def fast_ICA(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, device='N
         Xb = torch.as_tensor(X_np[start:end], dtype=torch.float32, device=dev)
         Xc = Xb - mean32
         Y[start:end] = Xc @ Omega
-        norm_X_sq += Xc.double().square().sum().item()
+        norm_X_sq += Xc.square().sum().item()
 
     Q, _ = torch.linalg.qr(Y, mode='reduced')
 
@@ -778,8 +778,8 @@ def fast_ICA(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, device='N
 #         Xc = Xb - mean32
 #         residual = Xc - W32[start:end] @ H32
 
-#         norm_X_sq += Xc.double().square().sum().item()
-#         residual_sq += residual.double().square().sum().item()
+#         norm_X_sq += Xc.square().sum().item()
+#         residual_sq += residual.square().sum().item()
 
 #     err = np.sqrt(residual_sq / max(norm_X_sq, 1e-12))
 

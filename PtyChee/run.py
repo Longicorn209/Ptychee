@@ -19,8 +19,8 @@ from .output import *
 
 
 def run_findRotateFromCurl(file, data_4D,
-        inner_radius = 0, 
-        outer_radius = 1,
+        inner_radius = 0,                        # inner radius for the annular ROI on CBED
+        outer_radius = 1,                        # outer radius for the annular ROI on CBED
         save_results = True,
 ):
     print_and_log('')
@@ -149,7 +149,7 @@ def run_LSQML(file, data_4D, Voltage, alpha, scan_step, scan_rotation_angle, sca
 
         detector_mask = None,                    # 2D NumPy mask matching the CBED size; 1 = included, 0 = excluded from the calculation
 
-        device = None,                           # specify the GPU device or use "cpu"
+        device = None,                           # specify the GPU device, or 'mps' for Apple, or use "cpu"
 
         plot_and_save_err = True,
         plot_and_save_LSQ_step = False,
@@ -286,7 +286,7 @@ def run_ePIE(file, data_4D, Voltage, alpha, scan_step, scan_rotation_angle, scan
 
         detector_mask = None,                    # 2D NumPy mask matching the CBED size; 1 = included, 0 = excluded from the calculation
 
-        device = None,                           # specify the GPU device or use "cpu"
+        device = None,                           # specify the GPU device, or 'mps' for Apple, or use "cpu"
 
         plot_and_save_err = True,
         plot_and_save_CBED_comparison = False,
@@ -605,7 +605,7 @@ def run_NMF(file, data_4D,
 
         use_log_scale = False,                   # apply logarithmic scaling to the input data or not
 
-        device = None,                           # specify the GPU device or use "cpu"
+        device = None,                           # specify the GPU device, or 'mps' for Apple, or use "cpu"
 
         show_W = True,
         show_H = True,
@@ -651,8 +651,7 @@ def run_PCA(file, data_4D,
 
         use_log_scale = False,                   # apply logarithmic scaling to the input data or not
 
-        device = None,                           # specify the GPU device or use "cpu"
-
+        device = None,                           # specify the GPU device, or 'mps' for Apple, or use "cpu"
         show_W = True, 
         show_H = True,
         save_results = True,
@@ -691,7 +690,7 @@ def run_ICA(file, data_4D,
 
         use_log_scale = False,                   # apply logarithmic scaling to the input data or not
 
-        device = None,                           # specify the GPU device or use "cpu"
+        device = None,                           # specify the GPU device, or 'mps' for Apple, or use "cpu"
 
         show_W = True, 
         show_H = True,
@@ -744,7 +743,7 @@ def run_INMF(file, data_4D,
 
         use_log_scale = False,                   # apply logarithmic scaling to the input data or not
 
-        device = None,                           # specify the GPU device or use "cpu"
+        device = None,                           # specify the GPU device, or 'mps' for Apple, or use "cpu"
 
         show_W = True, 
         show_H = True,
