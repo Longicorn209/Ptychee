@@ -18,7 +18,7 @@ from .utils import print_and_log, log_to_file, get_subplot_grid, RGB_Complex_Plo
 def nndsvd_init(X, rank, seed=0, device=None):
 
     if device is None:
-        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        device = 'cpu'
 
     torch.manual_seed(seed)
 
@@ -221,7 +221,7 @@ def fast_hals_NMF(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, alph
 # Perform PCA using randomized SVD.
 def PCA(data_4D, n_components, n_block=1, device='None', n_oversamples=10, n_power_iter=2, random_state=0):
 
-    if device is None or device == 'None':
+    if device is None:
         device = 'cpu'
 
     print_and_log('')
@@ -371,7 +371,7 @@ def PCA(data_4D, n_components, n_block=1, device='None', n_oversamples=10, n_pow
 # Perform FastICA with randomized PCA whitening.
 def fast_ICA(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, device='None', n_oversamples=10, n_power_iter=2, random_state=0):
 
-    if device is None or device == 'None':
+    if device is None:
         device = 'cpu'
 
     print_and_log('')
@@ -564,7 +564,7 @@ def fast_ICA(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, device='N
 # Perform PCA using covariance eigendecomposition.
 # def PCA(data_4D, n_components, n_block=1, device='None'):
 
-#     if device is None or device == 'None':
+#     if device is None:
 #         device = 'cpu'
 
 #     print_and_log('')
@@ -659,7 +659,7 @@ def fast_ICA(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, device='N
 # Perform FastICA with covariance-based PCA whitening.
 # def fast_ICA(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, device='None'):
 
-#     if device is None or device == 'None':
+#     if device is None:
 #         device = 'cpu'
 
 #     print_and_log('')
@@ -800,7 +800,7 @@ def nonnegative_independent_factorization(V, n_components=None, iter_max=1000, l
     import numpy as np
     import torch
 
-    if device is None or device == 'None':
+    if device is None:
         device = 'cpu'
 
     V = torch.as_tensor(V, dtype=torch.float32, device=device)
