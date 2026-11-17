@@ -126,8 +126,16 @@ def run_LSQML(file, data_4D, Voltage, alpha, scan_step, scan_rotation_angle, sca
         sorting_probe = True,                    # then the probes are sorted by their energies
         probe_fit = False,                       # fit probe into Zernike polynomials
         probe_support_mask = False,              # enable probe aperture support constraint or not
+        object_all_states = False,               # object update uses all probe states (incoherent sum) instead of state 0 only
+
+        s_apc_theta = 0,                         # step of adaptive propagator tilt update, 0 = off
+        s_apc_thickness = 0,                     # step of adaptive propagator slice thickness update, 0 = off
+        apc_start_iteration = None,              # adaptive propagator update start from this iteration
+        
         s_position_correction = 0,               # step of position correction
         pc_start_iteration = None,               # position correction start from this iteration
+        pc_interval = 5,                         # after pc_start_iteration the scan positions are updated once every pc_interval iterations
+        subpixel_position = True,                # shift the probe by the sub-pixel part of the scan position; always on when s_position_correction > 0
 
         Obj_pad = 10,                            # pad zero to the object function in x and y dimensions
         POA = False,                             # phase object approximation constraint 
@@ -188,8 +196,14 @@ def run_LSQML(file, data_4D, Voltage, alpha, scan_step, scan_rotation_angle, sca
                 sorting_probe = sorting_probe,
                 probe_fit = probe_fit,
                 probe_support_mask = probe_support_mask,
+                object_all_states = object_all_states,
+                s_apc_theta = s_apc_theta,
+                s_apc_thickness = s_apc_thickness,
+                apc_start_iteration = apc_start_iteration,
                 s_position_correction = s_position_correction,
                 pc_start_iteration = pc_start_iteration,
+                pc_interval=pc_interval,
+                subpixel_position = subpixel_position,
                 POA = POA, 
                 l2_fft_lambdaTikhonov = l2_fft_lambdaTikhonov,
                 l1_fft_softThreshold = l1_fft_softThreshold,
@@ -200,7 +214,7 @@ def run_LSQML(file, data_4D, Voltage, alpha, scan_step, scan_rotation_angle, sca
                 FFT_phase_offset = FFT_phase_offset,
                 detector_mask = detector_mask,
     )
-    LSQML_Obj, LSQML_Prb, Prb_EW, LSQML_err, Obj_LSQ_step, Prb_LSQ_step, pc_mean_shift, posset_pc, cbed_comparison = LSQML_results
+    LSQML_Obj, LSQML_Prb, Prb_EW, LSQML_err, Obj_LSQ_step, Prb_LSQ_step, pc_mean_shift, posset_pc, cbed_comparison, app_parameters = LSQML_results
 
     print_and_log('')
     print_and_log(f'################### Saving and Ploting ###################')
@@ -211,11 +225,17 @@ def run_LSQML(file, data_4D, Voltage, alpha, scan_step, scan_rotation_angle, sca
     if plot_and_save_CBED_comparison:
         iterPtycho_CBED_comparison_plot(cbed_comparison, save_results=save_results)
     if plot_and_save_object:
+        if s_apc_thickness:
+            slice_thickness = app_parameters["slice_thickness"]
         iterPtycho_objFunc_plot(LSQML_Obj, scan_rotation_angle, scan_flip, ptycho_move, data_shape, slice_thickness, save_results=save_results)
     if plot_and_save_probe:
         iterPtycho_proben_plot(LSQML_Prb, proben0, Prb_EW, scan_rotation_angle, scan_flip, data_shape, show_probe_comparison=show_probe_comparison, show_proben_Phase=show_proben_Phase, save_results=save_results)
     if s_position_correction:
         position_correction_plot(pc_mean_shift, posset_pc, posset)
+    if s_apc_theta or s_apc_thickness:
+        adaptive_propagator_plot(app_parameters, save_results=save_results)
+    if s_apc_theta:
+        tilt_map_plot(app_parameters, save_results=save_results)
 
     return LSQML_Obj, LSQML_Prb
 
@@ -243,8 +263,16 @@ def run_ePIE(file, data_4D, Voltage, alpha, scan_step, scan_rotation_angle, scan
         sorting_probe = True,                    # then the probes are sorted by their energies
         probe_fit = False,                       # fit probe into Zernike polynomials
         probe_support_mask = False,              # enable probe aperture support constraint or not
+        object_all_states = False,               # object update uses all probe states (incoherent sum) instead of state 0 only
+
+        s_apc_theta = 0,                         # step of adaptive propagator tilt update, 0 = off
+        s_apc_thickness = 0,                     # step of adaptive propagator slice thickness update, 0 = off
+        apc_start_iteration = None,              # adaptive propagator update start from this iteration
+
         s_position_correction = 0,               # step of position correction
         pc_start_iteration = None,               # position correction start from this iteration
+        pc_interval = 5,                         # after pc_start_iteration the scan positions are updated once every pc_interval iterations 
+        subpixel_position = True,                # shift the probe by the sub-pixel part of the scan position; always on when s_position_correction > 0
 
         Obj_pad = 10,                            # pad zero to the object function in x and y dimensions
         POA = False,                             # phase object approximation constraint 
@@ -304,8 +332,14 @@ def run_ePIE(file, data_4D, Voltage, alpha, scan_step, scan_rotation_angle, scan
                 sorting_probe = sorting_probe,
                 probe_fit = probe_fit,
                 probe_support_mask = probe_support_mask,
+                object_all_states = object_all_states,
+                s_apc_theta = s_apc_theta,
+                s_apc_thickness = s_apc_thickness,
+                apc_start_iteration = apc_start_iteration,
                 s_position_correction = s_position_correction,
                 pc_start_iteration = pc_start_iteration,
+                pc_interval=pc_interval,
+                subpixel_position = subpixel_position,
                 POA = POA, 
                 l2_fft_lambdaTikhonov = l2_fft_lambdaTikhonov,
                 l1_fft_softThreshold = l1_fft_softThreshold,
@@ -316,7 +350,7 @@ def run_ePIE(file, data_4D, Voltage, alpha, scan_step, scan_rotation_angle, scan
                 FFT_phase_offset = FFT_phase_offset,
                 detector_mask = detector_mask,
     )
-    ePIE_Obj, ePIE_Prb, Prb_EW, ePIE_err, pc_mean_shift, posset_pc, cbed_comparison = ePIE_results
+    ePIE_Obj, ePIE_Prb, Prb_EW, ePIE_err, pc_mean_shift, posset_pc, cbed_comparison, app_parameters = ePIE_results
 
     print(Prb_EW.shape)
 
@@ -327,11 +361,17 @@ def run_ePIE(file, data_4D, Voltage, alpha, scan_step, scan_rotation_angle, scan
     if plot_and_save_CBED_comparison:
         iterPtycho_CBED_comparison_plot(cbed_comparison, save_results=save_results)
     if plot_and_save_object:
+        if s_apc_thickness:
+            slice_thickness=app_parameters["slice_thickness"]
         iterPtycho_objFunc_plot(ePIE_Obj, scan_rotation_angle, scan_flip, ptycho_move, data_shape, slice_thickness, save_results=save_results)
     if plot_and_save_probe:
         iterPtycho_proben_plot(ePIE_Prb, proben0, Prb_EW, scan_rotation_angle, scan_flip, data_shape, show_probe_comparison=show_probe_comparison, show_proben_Phase=show_proben_Phase, save_results=save_results)
     if s_position_correction:
         position_correction_plot(pc_mean_shift, posset_pc, posset)
+    if s_apc_theta or s_apc_thickness:
+        adaptive_propagator_plot(app_parameters, save_results=save_results)
+    if s_apc_theta:
+        tilt_map_plot(app_parameters, save_results=save_results)
 
     return ePIE_Obj, ePIE_Prb
 
@@ -421,6 +461,63 @@ def run_SSB(file, data_4D, Voltage, alpha, scan_step, scan_rotation_angle, scan_
     SSB_plot(obj_fft, obj, plot_FFT=plot_FFT, save_results=save_results)
 
     return obj
+
+
+
+
+def run_LINV3D(file, data_4D, Voltage, alpha, scan_step, scan_rotation_angle, scan_flip,
+        defocus,                                 # Å, z coordinate of the first (top) reconstructed slice; z = 0 is the focal plane, overfocus > 0
+        thickness,                               # Å, depth range t' to be reconstructed, should appreciably exceed the specimen thickness
+        n_slice = None,                          # slice number, None: Nyquist sampling N_z = ceil(t' * lambda * k0^2)
+        ctf_mode = 'thick',                      # 'thick': CTF averaged over the slab of every slice; 'thin': delta planes
+        noise_normalization = True,              # normalize by the noise transfer function (applied before the truncated solution)
+        rcond = 1e-6,                            # relative singular value cutoff of the least-squares solution (truncated SVD)
+        qz_margin = 0,                           # keep q_z beyond the information limit by this many q_z steps
+        save_results = True,
+):
+    print_and_log('')
+    print_and_log(f'3D LINV')
+    print_and_log(f'File: {file}')
+    print_and_log('')
+    print_and_log(f'################ Experimental Information ################')
+    print_and_log(f'Voltage: {Voltage} kV')
+    print_and_log(f'Alpha: {alpha} rad')
+    print_and_log(f'scan step: {scan_step} Å/pixel')
+    print_and_log(f'defocus: {defocus} Å')
+    print_and_log(f'thickness: {thickness} Å')
+    print_and_log(f'scan rotation angle: {scan_rotation_angle} degrees')
+    print_and_log(f'scan flip x: {scan_flip}')
+    
+    data_shape = data_4D.shape
+
+    *_ , aperture_radius, center_dx, center_dy = PACBED_identify(data_4D, BF_threshold=0.5)
+    pPrime_pixel_size_dy, pPrime_pixel_size_dx = calculate_pPrime_calibration(scan_step, data_shape)
+    reciprocalSpace_pixel_size = calculate_recipro_pixeSize(Voltage, alpha, aperture_radius)
+
+    obj_fft, obj, z_list = LINV3D_engine(data_4D, 
+               pPrime_pixel_size_dy, 
+               pPrime_pixel_size_dx, 
+               center_dy, 
+               center_dx, 
+               scan_rotation_angle, 
+               scan_flip, 
+               aperture_radius, 
+               reciprocalSpace_pixel_size, 
+               Voltage, 
+               defocus,
+               thickness,
+               n_slice = n_slice,
+               ctf_mode = ctf_mode,
+               noise_normalization = noise_normalization,
+               rcond = rcond,
+               qz_margin = qz_margin,
+               )
+    
+    print_and_log('')
+    print_and_log(f'################### Saving and Ploting ###################')
+    LINV3D_plot(obj_fft, obj, z_list, save_results=save_results)
+
+    return obj, z_list
 
 
 
@@ -632,9 +729,9 @@ def run_ICA(file, data_4D,
 
 def run_INMF(file, data_4D, 
         n_components, 
-        iter_max = 1000,                          # maximum iteration number
-        tol = 1e-7,                               # convergence tolerance
-        n_block = None,                           # block number for saving memory, default is 1
+        iter_max = 1000,                         # maximum iteration number
+        tol = 1e-7,                              # convergence tolerance
+        n_block = None,                          # block number for saving memory, default is 1
         alpha_W = 0.0,                           # regularization strength for W
         alpha_H = 0.0,                           # regularization strength for H
         l1_ratio = 0.0,                          # L1/L2 regularization balance (0: L2, 1: L1)

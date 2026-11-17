@@ -86,62 +86,6 @@ def iterPtycho_LSQ_step_plot(Obj_LSQ_step, Prb_LSQ_step, save_results=True):
 
 
 
-# def iterPtycho_CBED_comparison_plot(cbed_comparison, save_results=True):
-
-#     fig, axes = plt.subplots(2, 2, figsize=(9.8, 8))
-
-#     axes = axes.flat
-
-#     vmin_left = cbed_comparison[[0, 2]].min()
-#     vmax_left = cbed_comparison[[0, 2]].max()
-
-#     vmin_right = cbed_comparison[[1, 3]].min()
-#     vmax_right = cbed_comparison[[1, 3]].max()
-
-#     im0 = axes[0].imshow(cbed_comparison[0], vmin=vmin_left, vmax=vmax_left)
-#     axes[0].set_title('CBED exp.')
-#     axes[0].set_xticks([])
-#     axes[0].set_yticks([])
-
-#     im1 = axes[1].imshow(cbed_comparison[1], vmin=vmin_right, vmax=vmax_right)
-#     axes[1].set_title('CBED recon.')
-#     axes[1].set_xticks([])
-#     axes[1].set_yticks([])
-
-#     im2 = axes[2].imshow(cbed_comparison[2], vmin=vmin_left, vmax=vmax_left)
-#     axes[2].set_xticks([])
-#     axes[2].set_yticks([])
-
-#     im3 = axes[3].imshow(cbed_comparison[3], vmin=vmin_right, vmax=vmax_right)
-#     axes[3].set_xticks([])
-#     axes[3].set_yticks([])
-
-#     fig.subplots_adjust(left=0.12, right=0.88, bottom=0.05, top=0.95, wspace=0.15, hspace=0.08)
-
-#     pos_left_top = axes[0].get_position()
-#     pos_left_bottom = axes[2].get_position()
-#     pos_right_top = axes[1].get_position()
-#     pos_right_bottom = axes[3].get_position()
-
-#     gap = 0.035
-#     cbar_width = 0.025
-
-#     cbar_ax_left = fig.add_axes([pos_left_top.x0 - gap - cbar_width, pos_left_bottom.y0, cbar_width, pos_left_top.y1 - pos_left_bottom.y0])
-#     cbar_ax_right = fig.add_axes([pos_right_top.x1 + gap, pos_right_bottom.y0, cbar_width, pos_right_top.y1 - pos_right_bottom.y0])
-
-#     cbar_left = fig.colorbar(im0, cax=cbar_ax_left)
-#     cbar_right = fig.colorbar(im1, cax=cbar_ax_right)
-
-#     cbar_ax_left.yaxis.set_ticks_position('left')
-#     cbar_ax_left.yaxis.set_label_position('left')
-
-#     _LOG_DIR = print_and_log("CBED Comparison saving")
-#     if save_results:
-#         outfile = os.path.join(_LOG_DIR, "CBED_Comparison.png")
-#         fig.savefig(outfile, dpi=300)  
-
-#     plt.show()
-
 
 
 def iterPtycho_CBED_comparison_plot(cbed_comparison, save_results=True):
@@ -232,6 +176,7 @@ def iterPtycho_proben_plot(proben, proben0, Prb_EW, scan_rotation_angle, scan_fl
     Prb_EW = rotate(Prb_EW, angle=scan_rotation_angle, axes=(0,1))
     dy_r, dx_r = proben[0].shape
     proben_shown = proben[:, int(dy_r/2)-int(dy/2):int(dy_r/2)+int(dy/2),int(dx_r/2)-int(dx/2):int(dx_r/2)+int(dx/2)]
+    Prb_EW = Prb_EW[int(dy_r/2)-int(dy/2):int(dy_r/2)+int(dy/2),int(dx_r/2)-int(dx/2):int(dx_r/2)+int(dx/2)]
 
     energy_n = np.sum(np.abs(proben_shown)**2, axis=(1,2))
     energy_total = np.sum(energy_n)
@@ -262,7 +207,7 @@ def iterPtycho_proben_plot(proben, proben0, Prb_EW, scan_rotation_angle, scan_fl
         axes[0].set_yticks([])
 
         plt.sca(axes[1])
-        RGB_Complex_Plot(proben_shown[0])
+        RGB_Complex_Plot(proben_shown.sum(axis=0))
         axes[1].set_title('Final Probe')
         axes[1].set_xticks([])
         axes[1].set_yticks([])
@@ -383,6 +328,7 @@ def iterPtycho_proben_plot(proben, proben0, Prb_EW, scan_rotation_angle, scan_fl
 
 
 def iterPtycho_objFunc_plot(objectn, scan_rotation_angle, scan_flip, ptycho_move, data_shape, slice_thickness,
+                            crop_to_FOV = True,
                             show_Amp_objectn  = False,
                             show_Phase_objectn = True,
                             show_Phase_sum_PS = True,
@@ -397,12 +343,15 @@ def iterPtycho_objFunc_plot(objectn, scan_rotation_angle, scan_flip, ptycho_move
     if save_results:
         np.save(os.path.join(_LOG_DIR, "Object_Complex.npy"), objectn)
 
-    if scan_flip:
-        objectn = np.flip(objectn, axis=2)
-        scan_rotation_angle *= -1
-    objectn = rotate(objectn, angle=scan_rotation_angle, axes=(1,2))
-    sy_r, sx_r = objectn[0].shape
-    objectn_shown = objectn[:, int(sy_r/2)-int(sy*ptycho_move/2):int(sy_r/2)+int(sy*ptycho_move/2),int(sx_r/2)-int(sx*ptycho_move/2):int(sx_r/2)+int(sx*ptycho_move/2)]
+    if crop_to_FOV:
+        if scan_flip:
+            objectn = np.flip(objectn, axis=2)
+            scan_rotation_angle *= -1
+        objectn = rotate(objectn, angle=scan_rotation_angle, axes=(1,2))
+        sy_r, sx_r = objectn[0].shape
+        objectn_shown = objectn[:, int(sy_r/2)-int(sy*ptycho_move/2):int(sy_r/2)+int(sy*ptycho_move/2),int(sx_r/2)-int(sx*ptycho_move/2):int(sx_r/2)+int(sx*ptycho_move/2)]
+    else:
+        objectn_shown = objectn
 
     if save_results:
         tifffile.imwrite(os.path.join(_LOG_DIR, "Object_Phase.tif"), np.angle(objectn_shown), photometric='minisblack')
@@ -439,7 +388,7 @@ def iterPtycho_objFunc_plot(objectn, scan_rotation_angle, scan_flip, ptycho_move
 
         for i in range(n_slice):
             axes[i].imshow(objectn_abs[i], cmap='gray', vmin=Amin, vmax=Amax)
-            axes[i].set_title(f'Amplitude {(i+1)*slice_thickness} Å slice', fontsize=10)
+            axes[i].set_title(f'Amplitude {round((i+1)*slice_thickness)} Å slice', fontsize=10)
             axes[i].set_xticks([])
             axes[i].set_yticks([])
 
@@ -471,7 +420,7 @@ def iterPtycho_objFunc_plot(objectn, scan_rotation_angle, scan_flip, ptycho_move
 
         for i in range(n_slice):
             axes[i].imshow(np.angle(objectn_shown[i]), cmap='gray', vmin=Pmin, vmax=Pmax)
-            axes[i].set_title(f'Phase {(i+1)*slice_thickness} Å slice', fontsize=10)
+            axes[i].set_title(f'Phase {round((i+1)*slice_thickness)} Å slice', fontsize=10)
             axes[i].set_xticks([])
             axes[i].set_yticks([])
 
@@ -527,8 +476,10 @@ def position_correction_plot(pc_mean_shift, posset_pc, posset, save_results=True
 
     _LOG_DIR = print_and_log("PC saving")
 
+    updated = np.flatnonzero(pc_mean_shift)     # the positions are updated only once every few iterations
+
     plt.figure(figsize=(6,4))
-    plt.plot(range(len(pc_mean_shift[1:])), pc_mean_shift[1:])
+    plt.plot(updated, pc_mean_shift[updated], marker='o', markersize=3)
 
     plt.xlabel("Iteration")
     plt.ylabel("pixels")
@@ -556,6 +507,135 @@ def position_correction_plot(pc_mean_shift, posset_pc, posset, save_results=True
     if save_results:
         outfile = os.path.join(_LOG_DIR, "Scan Position Comparison.png")
         plt.savefig(outfile, dpi=300)
+
+    plt.show()
+
+
+
+
+def adaptive_propagator_plot(app_parameters, save_results=True):
+
+    thickness = app_parameters['thickness_history']
+    tilt_std = app_parameters['tilt_std_history']
+    newton = app_parameters['newton_decrement_history']
+    apc_start = app_parameters['apc_start_iteration']
+
+    iteration = np.arange(len(newton))
+    window = 20                                 # iterations over which the relative change of the tilt spatial std is evaluated
+
+    panels = []
+    if app_parameters['s_apc_thickness'] > 0:
+        panels.append('thickness')
+    if app_parameters['s_apc_theta'] > 0:
+        panels.append('tilt')
+    # panels.append('newton')
+
+    fig, axes = plt.subplots(len(panels), 1, figsize=(8, 3.2 * len(panels)), sharex=True)
+    axes = np.atleast_1d(axes)
+
+    for ax, panel in zip(axes, panels):
+
+        if panel == 'thickness':
+            ax.plot(iteration, thickness)
+            ax.set_ylabel('Slice Thickness (Å)')
+            ax.set_title('Slice Thickness Optimization')
+
+        if panel == 'tilt':
+            ax.plot(iteration, tilt_std, label='spatial std')
+            ax.set_ylabel('Tilt Spatial Std (mrad)')
+            ax.set_title('Propagator Tilt Standard Deviation')
+
+            rel_change = np.full(len(tilt_std), np.nan)
+            if len(tilt_std) > window:
+                rel_change[window:] = np.abs(tilt_std[window:] - tilt_std[:-window]) / np.maximum(tilt_std[window:], 1e-12)
+            rel_change[(iteration < apc_start + window) | (tilt_std <= 0)] = np.nan
+
+            # ax_r = ax.twinx()
+            # ax_r.semilogy(iteration, rel_change, color='tab:orange', linestyle='--', label=f'relative change / {window} it')
+            # ax_r.set_ylabel(f'Relative Change / {window} it')
+
+            # handles = ax.get_lines() + ax_r.get_lines()
+            # ax.legend(handles, [h.get_label() for h in handles], loc='upper left')
+
+        if panel == 'newton':
+            valid = (iteration >= apc_start) & (newton > 0)
+            ax.semilogy(iteration[valid], newton[valid])
+            ax.set_xlabel('Iteration')
+            ax.set_ylabel('Newton Decrement')
+            ax.set_title('Relative Newton Decrement (predicted misfit decrease of a full step)')
+
+        ax.axvline(apc_start, color='gray', linestyle=':')
+        ax.grid(alpha=0.3)
+
+    axes[-1].xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+
+    plt.tight_layout()
+
+    _LOG_DIR = print_and_log("Adaptive Propagator saving")
+
+    if save_results:
+        np.savetxt(os.path.join(_LOG_DIR, "adaptive_propagator_history.txt"), np.stack([iteration, thickness, tilt_std, newton], axis=1),
+                   header='iteration  slice_thickness(A)  tilt_spatial_std(mrad)  newton_decrement')
+        outfile = os.path.join(_LOG_DIR, "adaptive_propagator_history.png")
+        fig.savefig(outfile, dpi=300)
+
+    plt.show()
+
+
+
+def tilt_map_plot(app_parameters, save_results=True):
+
+    theta_x = app_parameters['theta_x'] * 1000
+    theta_y = app_parameters['theta_y'] * 1000
+
+    mean_x = theta_x.mean()
+    mean_y = theta_y.mean()
+
+    # tilt_maps = [theta_x - mean_x, theta_y - mean_y]
+    # titles = [f'tilt x - mean ({mean_x:.3f} mrad)', f'tilt y - mean ({mean_y:.3f} mrad)']
+    tilt_maps = [theta_x, theta_y]
+    titles = [f'tilt x (mean: {mean_x:.3f} mrad)', f'tilt y (mean: {mean_y:.3f} mrad)']
+
+    vmax = max(np.abs(tilt_maps[0]).max(), np.abs(tilt_maps[1]).max(), 1e-12)
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+
+    for ax, tilt_map, title in zip(axes[:2], tilt_maps, titles):
+        im = ax.imshow(tilt_map, cmap='RdBu_r', vmin=-vmax, vmax=vmax)
+        ax.set_title(title)
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        cbar = plt.colorbar(im, cax=cax)
+        cbar.set_label('mrad')
+
+    # vector map: arrows = (tilt x, tilt y), background = tilt magnitude
+    ax = axes[2]
+    magnitude = np.sqrt(theta_x**2 + theta_y**2)
+    im = ax.imshow(magnitude, cmap='viridis')
+    sy, sx = theta_x.shape
+    stride = max(1, int(np.ceil(max(sy, sx) / 25)))
+    yy, xx = np.mgrid[0:sy:stride, 0:sx:stride]
+    ax.quiver(xx, yy, theta_x[::stride, ::stride], -theta_y[::stride, ::stride],
+              color='white', angles='uv', pivot='mid')
+    ax.set_title(f'tilt vector')
+    ax.set_xticks([])
+    ax.set_yticks([])
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05)
+    cbar = plt.colorbar(im, cax=cax)
+    cbar.set_label('|tilt| (mrad)')
+
+    plt.tight_layout()
+
+    _LOG_DIR = print_and_log("Tilt Map saving")
+
+    if save_results:
+        np.save(os.path.join(_LOG_DIR, "Tilt_Map.npy"), np.stack([theta_x, theta_y]))
+        outfile = os.path.join(_LOG_DIR, "Tilt_Map.png")
+        fig.savefig(outfile, dpi=300)
 
     plt.show()
 
@@ -816,6 +896,91 @@ def SSB_plot(obj_fft, obj, plot_FFT=False, save_results=True):
         plt.savefig(outfile, dpi=300)
 
     plt.show()
+
+
+
+def LINV3D_plot(obj_fft, obj, z_list, save_results=True):
+
+    _LOG_DIR = print_and_log("3D LINV saving")
+
+    n_slice, sy, sx = obj.shape
+    dz = z_list[1] - z_list[0] if n_slice > 1 else 1.0
+
+    obj_real = np.real(obj).astype(dtype=np.float32)
+
+    if save_results:
+        tifffile.imwrite(os.path.join(_LOG_DIR, "LINV3D_real.tif"), obj_real, photometric='minisblack')
+        # np.savetxt(os.path.join(_LOG_DIR, "LINV3D_z_list.txt"), z_list)
+        np.save(os.path.join(_LOG_DIR, "LINV3D_Obj_Fourier_Complex.npy"), obj_fft)
+
+
+    object_shown_rows, object_shown_cols = get_subplot_grid(n_slice)
+
+    Pmin, Pmax = obj_real.min(), obj_real.max()
+    P_norm = plt.Normalize(vmin=Pmin, vmax=Pmax)
+
+    fig, axes = plt.subplots(
+                object_shown_rows,
+                object_shown_cols,
+                figsize=(object_shown_cols*4.7, object_shown_rows*4),
+                constrained_layout=False
+                )
+    axes = np.array([axes]).flatten()
+
+    for ax in axes[n_slice:]:
+        ax.axis("off")
+
+    fig.subplots_adjust(wspace=0.2, hspace=0.2, left=0.03, right=0.85, top=0.97, bottom=0.03)  
+    cbar_ax = fig.add_axes([0.88, 0.03, 0.02, 0.94])  # [left, bottom, width, height]
+
+    sm = plt.cm.ScalarMappable(cmap='gray', norm=P_norm)
+    sm.set_array([])
+    fig.colorbar(sm, cax=cbar_ax, label="Phase [rad]")
+
+    for i in range(n_slice):
+        axes[i].imshow(obj_real[i], cmap='gray', vmin=Pmin, vmax=Pmax)
+        axes[i].set_title(f'Phase {round(z_list[i])} Å slice', fontsize=10)
+        axes[i].set_xticks([])
+        axes[i].set_yticks([])
+
+    if save_results:
+        outfile = os.path.join(_LOG_DIR, "LINV3D_real.png")
+        plt.savefig(outfile, dpi=300)
+
+    plt.show()
+
+
+    obj_real_sum = np.sum(obj_real, axis=0)
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+
+    im0 = axes[0].imshow(obj_real_sum, cmap='gray')
+    axes[0].set_title('Summed Obj Real')
+    axes[0].set_xticks([])
+    axes[0].set_yticks([])
+
+    divider1 = make_axes_locatable(axes[0])
+    cax1 = divider1.append_axes("right", size="5%", pad=0.2)
+    fig.colorbar(im0, cax=cax1)
+
+    im1 = axes[1].imshow(np.log(np.sqrt(np.sum(np.abs(obj_fft)**2, axis=0))+1e-5), cmap='gray')
+    axes[1].set_title('Summed Obj FFT')
+    axes[1].set_xticks([])
+    axes[1].set_yticks([])
+
+    divider2 = make_axes_locatable(axes[1])
+    cax2 = divider2.append_axes("right", size="5%", pad=0.2)
+    fig.colorbar(im1, cax=cax2)
+
+    plt.tight_layout()
+
+    if save_results:
+        tifffile.imwrite(os.path.join(_LOG_DIR, "LINV3D_real_Sum.tif"), obj_real_sum.astype(dtype=np.float32))
+        outfile = os.path.join(_LOG_DIR, "LINV3D_Summed.png")
+        plt.savefig(outfile, dpi=300)
+
+    plt.show()
+
 
 
 
