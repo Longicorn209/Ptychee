@@ -1,6 +1,6 @@
 """
 Author: Zeyu Wang
-Date: September 2025
+Date: November 2026
 Description: "analytical ptychogrphay"
 """
 
@@ -161,98 +161,13 @@ def _make_aperture_stack(dy, dx, center_dy, center_dx, aperture_radius, reciproc
 
 
 
-def WDD_engine(data_4D, 
-               pPrime_pixel_size_dy, 
-               pPrime_pixel_size_dx, 
-               center_dy, 
-               center_dx, 
-               scan_rotation_angle, 
-               scan_flip, 
-               aperture_radius, 
-               reciprocalSpace_pixel_size, 
-               Voltage, 
-               defocus,
-               epsilon_WDD = 0.1,
-               legacy_output = True,
-               ):
+def _WDD_finalize(obj_WDD_f, center_sy, center_sx, legacy_output):
+    # obj_WDD_f: (sy, sx) r-FFT value of obj_WDD at the single used frequency, for one defocus.
     # legacy_output = True : the last step (D00, flip) is exactly the original one, so the result equals the original code.
     # legacy_output = False: D00 = sqrt(|.|) and the flip is done around Q = 0 (np.roll for even sizes); obj_fft is then
     #                        consistent with objFunc and the image is not shifted by one pixel (the result differs from the
     #                        original by that one-pixel shift of objFunc / one-pixel shift of obj_fft).
-    print_and_log('')
-    print_and_log('##################### WDD Parameters ######################')
-
-    sy, sx, dy, dx = data_4D.shape
-    np.maximum(data_4D, 0, out=data_4D)                     # same as data_4D[data_4D<0] = 0 (in place, as in the original)
-
-    if not scan_flip:
-        scan_rotation_angle *= -1
-    theta_r = np.pi*scan_rotation_angle/180
-
-    print_and_log(f'Trotter Pattern rotation angle: {scan_rotation_angle} degrees')
-    print_and_log(f'Trotter Pattern flip x: {scan_flip}')
-    print_and_log(f'WDD epsilon: {epsilon_WDD}')
-
-    center_sy = sy//2
-    center_sx = sx//2
-
-    print_and_log('')
-    print_and_log('####################### WDD Process #######################')
-
-    data_4D_fft01 = p_fft(data_4D)
-    del data_4D
-
-    ry, rx = _scan_shifts(sy, sx, center_sy, center_sx, pPrime_pixel_size_dy, pPrime_pixel_size_dx, reciprocalSpace_pixel_size, theta_r, scan_flip)
-
-    ApeFunc0 = ApeFunc(center_dy, center_dx, dy, dx, aperture_radius, reciprocalSpace_pixel_size, Voltage, defocus)
-    ApeFunc_WDD_0 = np.fft.ifft2(np.fft.ifftshift(ApeFunc0*np.conj(ApeFunc0)))
-    epsilon = float(np.sum(np.abs(ApeFunc_WDD_0)**2)*epsilon_WDD)
-    ApeFunc0 = ApeFunc0.astype(np.complex64)
-
-    Q2 = ry**2 + rx**2
-    pick = np.unique(np.concatenate([np.argsort(Q2.ravel())[-3:], np.arange(0, Q2.size, max(1, Q2.size//5))]))
-    test_centers = (np.concatenate([[center_dy, center_dy - 0.37*aperture_radius], center_dy - ry.ravel()[pick]]),
-                    np.concatenate([[center_dx, center_dx + 0.52*aperture_radius], center_dx - rx.ravel()[pick]]))
-    aperture_stack = _make_aperture_stack(dy, dx, center_dy, center_dx, aperture_radius, reciprocalSpace_pixel_size, Voltage, defocus, test_centers)
-
-    # Only the (int(center_dy), int(center_dx)) element of the r-FFT of obj_WDD is used afterwards, i.e. a single
-    # frequency: it is evaluated directly for each p' row, so ApeFunc_WDD / obj_WDD / obj_WDD_fft23 are never stored.
-    fy = int(center_dy) - dy//2
-    fx = int(center_dx) - dx//2
-    W_f = np.exp(-2j*np.pi*(fy*np.arange(dy)[:, None]/dy + fx*np.arange(dx)[None, :]/dx)).astype(np.complex64)
-    obj_WDD_f = np.zeros((sy, sx), dtype=np.complex64)
-
-    rows = _row_chunk(sy, sx*dy*dx)
-    start_time = time.time()
-    print("\rWDD progressing: {:^3.0f}%[{}->{}] ?iter/s ({:0>2}:{:0>2}:{:0>2}<??:??:??)".format(0,"*"*0,"."*10,0,0,0),end = "")
-    for s0 in range(0, sy, rows):
-        s1 = min(sy, s0+rows)
-        c = s1 - s0
-
-        D_rows = sfft.ifft2(sfft.ifftshift(data_4D_fft01[s0:s1], axes=(2, 3)), axes=(2, 3), workers=-1)
-
-        A = aperture_stack((center_dy - ry[s0:s1]).ravel(), (center_dx - rx[s0:s1]).ravel()).reshape(c, sx, dy, dx)
-        np.conj(A, out=A)
-        A *= ApeFunc0
-        K = sfft.ifft2(sfft.ifftshift(A, axes=(2, 3)), axes=(2, 3), workers=-1)
-        del A
-
-        denominator = K.real**2
-        denominator += K.imag**2
-        denominator += epsilon
-        np.conj(K, out=K)
-        K *= D_rows                                          # conj(K)*D/(|K|^2+epsilon), evaluated at the single frequency
-        K *= W_f
-        K /= denominator
-        obj_WDD_f[s0:s1] = K.sum(axis=(2, 3))
-
-        print("\r"+_progress_line('WDD', s1, sy, start_time),end = "")
-    print('')
-    log_to_file(_progress_line('WDD', sy, sy, start_time))
-
-    total_time = time.time() - start_time
-    print_and_log(f'WDD process finished in {total_time} s')
-
+    sy, sx = obj_WDD_f.shape
 
     if legacy_output:
         D00 = np.sqrt(obj_WDD_f[center_sy][center_sx])
@@ -276,6 +191,127 @@ def WDD_engine(data_4D,
         objFunc = np.fft.ifft2(np.fft.ifftshift(obj_fft))
 
     return obj_fft, objFunc
+
+
+
+def WDD_engine(data_4D, 
+               pPrime_pixel_size_dy, 
+               pPrime_pixel_size_dx, 
+               center_dy, 
+               center_dx, 
+               scan_rotation_angle, 
+               scan_flip, 
+               aperture_radius, 
+               reciprocalSpace_pixel_size, 
+               Voltage, 
+               defocus,
+               epsilon_WDD = 0.1,
+               legacy_output = True,
+               ):
+    # defocus: scalar -> obj_fft, objFunc of shape (sy, sx), the result equals the single-defocus code.
+    #          list / array -> defocus section series, obj_fft, objFunc of shape (n_defocus, sy, sx).
+    # In the series case the data-dependent steps (FFT along p, ifft of the detector rows) are done only once,
+    # only the defocus-dependent kernel is evaluated for every defocus.
+    # legacy_output: see _WDD_finalize.
+    print_and_log('')
+    print_and_log('##################### WDD Parameters ######################')
+
+    sy, sx, dy, dx = data_4D.shape
+    np.maximum(data_4D, 0, out=data_4D)                     # same as data_4D[data_4D<0] = 0 (in place, as in the original)
+
+    defocus_series = np.ndim(defocus) > 0
+    defocus_list = np.atleast_1d(np.asarray(defocus, dtype=np.float64)).ravel()
+    n_defocus = len(defocus_list)
+
+    if not scan_flip:
+        scan_rotation_angle *= -1
+    theta_r = np.pi*scan_rotation_angle/180
+
+    print_and_log(f'Trotter Pattern rotation angle: {scan_rotation_angle} degrees')
+    print_and_log(f'Trotter Pattern flip x: {scan_flip}')
+    print_and_log(f'WDD epsilon: {epsilon_WDD}')
+    if defocus_series:
+        print_and_log(f'defocus sections: {n_defocus}, from {defocus_list[0]:g} Å to {defocus_list[-1]:g} Å')
+
+    center_sy = sy//2
+    center_sx = sx//2
+
+    print_and_log('')
+    print_and_log('####################### WDD Process #######################')
+
+    data_4D_fft01 = p_fft(data_4D)
+    del data_4D
+
+    ry, rx = _scan_shifts(sy, sx, center_sy, center_sx, pPrime_pixel_size_dy, pPrime_pixel_size_dx, reciprocalSpace_pixel_size, theta_r, scan_flip)
+
+    Q2 = ry**2 + rx**2
+    pick = np.unique(np.concatenate([np.argsort(Q2.ravel())[-3:], np.arange(0, Q2.size, max(1, Q2.size//5))]))
+    test_centers = (np.concatenate([[center_dy, center_dy - 0.37*aperture_radius], center_dy - ry.ravel()[pick]]),
+                    np.concatenate([[center_dx, center_dx + 0.52*aperture_radius], center_dx - rx.ravel()[pick]]))
+
+    # defocus-dependent quantities, one entry per defocus
+    ApeFunc0_list = []
+    epsilon_list = []
+    aperture_stack_list = []
+    for defocus_i in defocus_list:
+        ApeFunc0 = ApeFunc(center_dy, center_dx, dy, dx, aperture_radius, reciprocalSpace_pixel_size, Voltage, defocus_i)
+        ApeFunc_WDD_0 = np.fft.ifft2(np.fft.ifftshift(ApeFunc0*np.conj(ApeFunc0)))
+        epsilon_list.append(float(np.sum(np.abs(ApeFunc_WDD_0)**2)*epsilon_WDD))
+        ApeFunc0_list.append(ApeFunc0.astype(np.complex64))
+        aperture_stack_list.append(_make_aperture_stack(dy, dx, center_dy, center_dx, aperture_radius, reciprocalSpace_pixel_size, Voltage, defocus_i, test_centers))
+
+    # Only the (int(center_dy), int(center_dx)) element of the r-FFT of obj_WDD is used afterwards, i.e. a single
+    # frequency: it is evaluated directly for each p' row, so ApeFunc_WDD / obj_WDD / obj_WDD_fft23 are never stored.
+    fy = int(center_dy) - dy//2
+    fx = int(center_dx) - dx//2
+    W_f = np.exp(-2j*np.pi*(fy*np.arange(dy)[:, None]/dy + fx*np.arange(dx)[None, :]/dx)).astype(np.complex64)
+    obj_WDD_f = np.zeros((n_defocus, sy, sx), dtype=np.complex64)
+
+    rows = _row_chunk(sy, sx*dy*dx)
+    total_work = sy*n_defocus
+    start_time = time.time()
+    print("\rWDD progressing: {:^3.0f}%[{}->{}] ?iter/s ({:0>2}:{:0>2}:{:0>2}<??:??:??)".format(0,"*"*0,"."*10,0,0,0),end = "")
+    for s0 in range(0, sy, rows):
+        s1 = min(sy, s0+rows)
+        c = s1 - s0
+
+        D_rows = sfft.ifft2(sfft.ifftshift(data_4D_fft01[s0:s1], axes=(2, 3)), axes=(2, 3), workers=-1)       # shared by all defocus
+
+        for fi in range(n_defocus):
+            A = aperture_stack_list[fi]((center_dy - ry[s0:s1]).ravel(), (center_dx - rx[s0:s1]).ravel()).reshape(c, sx, dy, dx)
+            np.conj(A, out=A)
+            A *= ApeFunc0_list[fi]
+            K = sfft.ifft2(sfft.ifftshift(A, axes=(2, 3)), axes=(2, 3), workers=-1)
+            del A
+
+            denominator = K.real**2
+            denominator += K.imag**2
+            denominator += epsilon_list[fi]
+            np.conj(K, out=K)
+            K *= D_rows                                      # conj(K)*D/(|K|^2+epsilon), evaluated at the single frequency
+            K *= W_f
+            K /= denominator
+            obj_WDD_f[fi, s0:s1] = K.sum(axis=(2, 3))
+
+            print("\r"+_progress_line('WDD', s0*n_defocus + (fi+1)*c, total_work, start_time),end = "")
+    print('')
+    log_to_file(_progress_line('WDD', total_work, total_work, start_time))
+
+    total_time = time.time() - start_time
+    print_and_log(f'WDD process finished in {total_time} s')
+
+
+    obj_fft_list = []
+    objFunc_list = []
+    for fi in range(n_defocus):
+        obj_fft_i, objFunc_i = _WDD_finalize(obj_WDD_f[fi], center_sy, center_sx, legacy_output)
+        obj_fft_list.append(obj_fft_i)
+        objFunc_list.append(objFunc_i)
+
+    if not defocus_series:
+        return obj_fft_list[0], objFunc_list[0]
+
+    return np.stack(obj_fft_list), np.stack(objFunc_list)
 
 
 

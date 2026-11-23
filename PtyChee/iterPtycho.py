@@ -1,3 +1,9 @@
+"""
+Author: Zeyu Wang
+Date: November 2026
+Description: "iterative ptychogrphay"
+"""
+
 import numpy as np
 import time
 
@@ -888,37 +894,38 @@ def update_scan_positions_gn(posset_blocks, pos_g, pos_H, Oy, Ox, dy, dx, s_posi
 
 @torch.no_grad()
 def LSQML_engine(iter_max, s_O, s_P,
-                    data_4D, Voltage, alpha, aperture_radius, 
-                    posset, proben0, objectn, slice_thickness, k_theta,
-                    device=None,
-                    n_block=None, 
-                    position_clustering=False, 
-                    plot_cluster = False,
-                    e_f=1e-9, 
-                    e_g=1e-1, 
-                    e_LSQ=5e-1,
-                    probe_orthog_constr=False, 
-                    sorting_probe=True, 
-                    probe_fit=False,
-                    probe_support_mask=False,
-                    object_all_states=False,     # True: object update uses all probe states (incoherent sum) instead of state 0 only
-                    s_apc_theta=0,               # step of the adaptive propagator tilt update, 0 = off
-                    s_apc_thickness=0,           # step of the adaptive propagator thickness update, 0 = off
-                    apc_start_iteration=None,
-                    s_position_correction=0,
-                    pc_start_iteration=None,
-                    pc_interval = 5,             # after pc_start_iteration the scan positions are updated once every pc_interval iterations
-                    subpixel_position=True,     # True: cut object patches at floor(position) and apply the sub-pixel part to the probe
-                    POA=False,
-                    l2_fft_lambdaTikhonov=0, 
-                    l1_fft_softThreshold=0, 
-                    l0_fft_hardThreshold=0, 
-                    kz_regularization=0, 
-                    zblur_std=0,
-                    rh_positive_phase=False, 
-                    FFT_phase_offset=0,
-                    detector_mask=None,
-                    ):
+                data_4D, Voltage, alpha, aperture_radius, 
+                posset, proben0, objectn, slice_thickness, k_theta,
+                device=None,
+                n_block=None, 
+                position_clustering=False, 
+                plot_cluster = False,
+                noise_model='amplitude',
+                detector_mask=None,
+                e_f=1e-9, 
+                e_g=1e-1, 
+                e_LSQ=5e-1,
+                probe_orthog_constr=False, 
+                sorting_probe=True, 
+                probe_fit=False,
+                probe_support_mask=False,
+                object_all_states=False,     # True: object update uses all probe states (incoherent sum) instead of state 0 only
+                s_apc_theta=0,               # step of the adaptive propagator tilt update, 0 = off
+                s_apc_thickness=0,           # step of the adaptive propagator thickness update, 0 = off
+                apc_start_iteration=None,
+                s_position_correction=0,
+                pc_start_iteration=None,
+                pc_interval = 5,             # after pc_start_iteration the scan positions are updated once every pc_interval iterations
+                subpixel_position=True,     # True: cut object patches at floor(position) and apply the sub-pixel part to the probe
+                POA=False,
+                l2_fft_lambdaTikhonov=0, 
+                l1_fft_softThreshold=0, 
+                l0_fft_hardThreshold=0, 
+                kz_regularization=0, 
+                zblur_std=0,
+                rh_positive_phase=False, 
+                FFT_phase_offset=0,
+                ):
     if device is None:
         if torch.cuda.is_available():
             device = torch.device("cuda:0")
@@ -961,10 +968,12 @@ def LSQML_engine(iter_max, s_O, s_P,
     print_and_log(f'Number of Iterations: {iter_max}')
     print_and_log(f'Step for Updating Object: {s_O}')
     print_and_log(f'Step for Updating Probe: {s_P}')
+    print_and_log(f'Noise Model: {noise_model}')
     print_and_log(f'Epsilon for Recipro Optim: {e_f}')
     print_and_log(f'Epsilon for Real Optim: {e_g}')
     print_and_log(f'Epsilon for LSQ: {e_LSQ}')
     # print_and_log(f'Object Update from All Probe States: {object_all_states}')
+    print_and_log(f'')
     print_and_log(f'Probe Constraints:')
     print_and_log(f'    Number of Position Blocks: {n_block}')
     print_and_log(f'    Average Block Size: {N_pos / n_block:.2f} positions')
@@ -972,6 +981,7 @@ def LSQML_engine(iter_max, s_O, s_P,
     print_and_log(f'    Probe Orthog Constraint: {probe_orthog_constr}')
     print_and_log(f'    Probe Support Mask: {probe_support_mask}')
     print_and_log(f'    Sorting Probe by Energy: {sorting_probe}')
+    print_and_log(f'')
     print_and_log(f'Object Constraints:')
     print_and_log(f'    Phase Object Approximation (POA): {POA}')
     print_and_log(f'    Object Positive Phase: {rh_positive_phase}')
@@ -982,11 +992,13 @@ def LSQML_engine(iter_max, s_O, s_P,
     print_and_log(f'    Object zblur Std: {zblur_std} Å')
     print_and_log(f'    Object FFT phase offset: {FFT_phase_offset}')
     if adaptive_propagator:
+        print_and_log(f'')
         print_and_log(f'Adaptive Propagator Activited:')
         print_and_log(f'    Step for Adaptive Propagator Tilt: {s_apc_theta}')
         print_and_log(f'    Step for Adaptive Propagator Thickness: {s_apc_thickness}')
         print_and_log(f'    Start for Adaptive Propagator: {apc_start_iteration}th iteration')
     if position_correction:
+        print_and_log(f'')
         print_and_log(f'Scan Position Correction Activited:')
         print_and_log(f'    Step for Position Correction: {s_position_correction}')
         print_and_log(f'    Start for Position Correction: {pc_start_iteration}th iteration')
@@ -1147,23 +1159,34 @@ def LSQML_engine(iter_max, s_O, s_P,
                     pos_g, pos_H, poss_1D.long(), Prb_ms, Illuminated_patches, psi_fft, amplitudes_patches,
                     a_psi_fft, propagators_block, detector_mask_GPU, dy, dx, device)
 
-            # Amplitude
-            chi_fft_R = amplitudes_patches / (a_psi_fft + e_f) - 1
 
-            # Anscombe
-            # chi_fft_R = (amplitudes_patches**2+0.375).sqrt() / ((a_psi_fft**2+0.375).sqrt() + e_f) - 1
+            if noise_model == 'amplitude':
+                chi_fft_R = amplitudes_patches / (a_psi_fft + e_f) - 1
 
-            # Gaussian
-            # chi_fft_R = amplitudes_patches.pow(2) / (a_psi_fft.pow(2) + e_f) - 1
+            elif noise_model == 'anscombe':
+                I_m = amplitudes_patches.pow(2)
+                I_c = a_psi_fft.pow(2)
+                chi_fft_R = (I_m + 0.375).sqrt() / ((I_c + 0.375).sqrt() + e_f) - 1
 
-            # Poisson
-            # chi_fft_R = 1 - a_psi_fft.pow(2) / (amplitudes_patches.pow(2) + e_f)
+            elif noise_model == 'poisson':
+                I_m = amplitudes_patches.pow(2)
+                I_c = a_psi_fft.pow(2)
+                chi_fft_R = 0.5 * (I_m / (I_c + e_f) - 1)
+                chi_fft_R = torch.minimum(chi_fft_R, amplitudes_patches / (a_psi_fft + e_f))
+
+            elif noise_model == 'gaussian':
+                I_m = amplitudes_patches.pow(2)
+                I_c = a_psi_fft.pow(2)
+                I_ref = I_c.amax(dim=(-2, -1), keepdim=True)
+                chi_fft_R = (I_m - I_c) / (2 * I_ref + e_f)
+
 
             chi_fft_R *= detector_mask_GPU
 
             chi_fft = psi_fft * chi_fft_R.unsqueeze(0).to(torch.complex64)
             chi = ifft2(ifftshift(chi_fft, dim=(2, 3)), dim=(2, 3))
-                        
+
+
             for sr in range(n_slice - 1, -1, -1):
                 if sr != n_slice - 1:
                     chi_fft = fft2(chi, dim=(2, 3))
@@ -1210,11 +1233,27 @@ def LSQML_engine(iter_max, s_O, s_P,
                     a_P = (Mr_1 / Ml_11).mean(dim=1) * s_P
                     Prb_LSQ_step[i] += a_P / n_block
                     proben_GPU += a_P[:, None, None] * gPrb
-
                 chi = gPrb_i
 
-            err_u += (amplitudes_patches - (psi_fft.abs().pow(2).sum(dim=0)).sqrt() * detector_mask_GPU).pow(2).sum()
-            err_d += (amplitudes_patches * detector_mask_GPU).to(torch.float32).pow(2).sum()
+            I_m = amplitudes_patches.pow(2)
+            I_c = psi_fft.abs().pow(2).sum(dim=0)
+            A_c = I_c.sqrt()
+            m = detector_mask_GPU
+
+            if noise_model == 'amplitude':
+                err_u += ((amplitudes_patches - A_c) * m).pow(2).sum()
+                err_d += (amplitudes_patches * m).pow(2).sum()
+            elif noise_model == 'anscombe':
+                err_u += (((I_m + 0.375).sqrt() - (I_c + 0.375).sqrt()) * m).pow(2).sum()
+                err_d += ((I_m + 0.375) * m).sum()
+            elif noise_model == 'gaussian':
+                err_u += ((I_m - I_c) * m).pow(2).sum()
+                err_d += (I_m * m).pow(2).sum()
+            elif noise_model == 'poisson':
+                Ic = I_c.clamp_min(1e-12)
+                dev = 2 * (Ic - I_m + torch.where(I_m > 0, I_m * (I_m.clamp_min(1e-12) / Ic).log(), torch.zeros_like(I_m)))
+                err_u += (dev * m).sum()
+                err_d += m.sum() * Ic.shape[0] 
 
         if torch.isnan(err_u / err_d):
             print('')
@@ -1356,6 +1395,8 @@ def ePIE_engine(iter_max, s_O, s_P,
                 n_block=None,
                 position_clustering=False,
                 plot_cluster=False,
+                noise_model='amplitude',
+                detector_mask=None,
                 e_f=1e-9,
                 alpha_O=0,
                 alpha_P=0,
@@ -1379,7 +1420,6 @@ def ePIE_engine(iter_max, s_O, s_P,
                 zblur_std=0,
                 rh_positive_phase=False,
                 FFT_phase_offset=0,
-                detector_mask=None,
                 ):
 
     if device is None:
@@ -1423,10 +1463,12 @@ def ePIE_engine(iter_max, s_O, s_P,
     print_and_log(f'Number of Iterations: {iter_max}')
     print_and_log(f'Step for Updating Object: {s_O}')
     print_and_log(f'Step for Updating Probe: {s_P}')
+    print_and_log(f'Noise Model: {noise_model}')
     print_and_log(f'Epsilon for Recipro Optim: {e_f}')
     print_and_log(f'rPIE-alpha for Object: {alpha_O }')
     print_and_log(f'rPIE-alpha for Probe: {alpha_P}')
     # print_and_log(f'Object Update from All Probe States: {object_all_states}')
+    print_and_log(f'')
     print_and_log(f'Probe Constraints:')
     print_and_log(f'    Number of Position Blocks: {n_block}')
     print_and_log(f'    Average Block Size: {N_pos / n_block:.2f} positions')
@@ -1434,6 +1476,7 @@ def ePIE_engine(iter_max, s_O, s_P,
     print_and_log(f'    Probe Orthog Constraint: {probe_orthog_constr}')
     print_and_log(f'    Probe Support Mask: {probe_support_mask}')
     print_and_log(f'    Sorting Probe by Energy: {sorting_probe}')
+    print_and_log(f'')
     print_and_log(f'Object Constraints:')
     print_and_log(f'    Phase Object Approximation (POA): {POA}')
     print_and_log(f'    Object Positive Phase: {rh_positive_phase}')
@@ -1444,11 +1487,13 @@ def ePIE_engine(iter_max, s_O, s_P,
     print_and_log(f'    Object zblur Std: {zblur_std} Å')
     print_and_log(f'    Object FFT phase offset: {FFT_phase_offset}')
     if adaptive_propagator:
+        print_and_log(f'')
         print_and_log(f'Adaptive Propagator Activited:')
         print_and_log(f'    Step for Adaptive Propagator Tilt: {s_apc_theta}')
         print_and_log(f'    Step for Adaptive Propagator Thickness: {s_apc_thickness}')
         print_and_log(f'    Start for Adaptive Propagator: {apc_start_iteration}th iteration')
     if position_correction:
+        print_and_log(f'')
         print_and_log(f'Scan Position Correction Activited:')
         print_and_log(f'    Step for Position Correction: {s_position_correction}')
         print_and_log(f'    Start for Position Correction: {pc_start_iteration}th iteration')
@@ -1585,20 +1630,32 @@ def ePIE_engine(iter_max, s_O, s_P,
                     pos_g, pos_H, poss_1D.long(), Prb_ms, Illuminated_patches, psi_fft, amplitudes_patches,
                     a_psi_fft, propagators_block, detector_mask_GPU, dy, dx, device)
 
-            # Amplitude
-            chi_fft_R = amplitudes_patches / (a_psi_fft + e_f) - 1
 
-            # Anscombe
-            # chi_fft_R = (amplitudes_patches**2+0.375).sqrt() / ((a_psi_fft**2+0.375).sqrt() + e_f) - 1
+            if noise_model == 'amplitude':
+                chi_fft_R = amplitudes_patches / (a_psi_fft + e_f) - 1
 
-            # Gaussian
-            # chi_fft_R = amplitudes_patches.pow(2) / (a_psi_fft.pow(2) + e_f) - 1
+            elif noise_model == 'anscombe':
+                I_m = amplitudes_patches.pow(2)
+                I_c = a_psi_fft.pow(2)
+                chi_fft_R = (I_m + 0.375).sqrt() / ((I_c + 0.375).sqrt() + e_f) - 1
 
-            # Poisson
-            # chi_fft_R = 1 - a_psi_fft.pow(2) / (amplitudes_patches.pow(2) + e_f)
+            elif noise_model == 'poisson':
+                I_m = amplitudes_patches.pow(2)
+                I_c = a_psi_fft.pow(2)
+                chi_fft_R = 0.5 * (I_m / (I_c + e_f) - 1)
+                chi_fft_R = torch.minimum(chi_fft_R, amplitudes_patches / (a_psi_fft + e_f))
+
+            elif noise_model == 'gaussian':
+                I_m = amplitudes_patches.pow(2)
+                I_c = a_psi_fft.pow(2)
+                I_ref = I_c.amax(dim=(-2, -1), keepdim=True)
+                chi_fft_R = (I_m - I_c) / (2 * I_ref + e_f)
+
             chi_fft_R *= detector_mask_GPU
+
             chi_fft = psi_fft * chi_fft_R.unsqueeze(0).to(torch.complex64)
             chi = ifft2(ifftshift(chi_fft, dim=(2, 3)), dim=(2, 3))
+
 
             for sr in range(n_slice - 1, -1, -1):
                 if sr != n_slice - 1:
@@ -1628,8 +1685,25 @@ def ePIE_engine(iter_max, s_O, s_P,
                     proben_GPU += s_P * dPrb / b_size
                 chi = gPrb_i
 
-            err_u += (amplitudes_patches - psi_fft.abs().pow(2).sum(dim=0).sqrt() * detector_mask_GPU).pow(2).sum()
-            err_d += (amplitudes_patches * detector_mask_GPU).to(torch.float32).pow(2).sum()
+            I_m = amplitudes_patches.pow(2)
+            I_c = psi_fft.abs().pow(2).sum(dim=0)
+            A_c = I_c.sqrt()
+            m = detector_mask_GPU
+
+            if noise_model == 'amplitude':
+                err_u += ((amplitudes_patches - A_c) * m).pow(2).sum()
+                err_d += (amplitudes_patches * m).pow(2).sum()
+            elif noise_model == 'anscombe':
+                err_u += (((I_m + 0.375).sqrt() - (I_c + 0.375).sqrt()) * m).pow(2).sum()
+                err_d += ((I_m + 0.375) * m).sum()
+            elif noise_model == 'gaussian':
+                err_u += ((I_m - I_c) * m).pow(2).sum()
+                err_d += (I_m * m).pow(2).sum()
+            elif noise_model == 'poisson':
+                Ic = I_c.clamp_min(1e-12)
+                dev = 2 * (Ic - I_m + torch.where(I_m > 0, I_m * (I_m.clamp_min(1e-12) / Ic).log(), torch.zeros_like(I_m)))
+                err_u += (dev * m).sum()
+                err_d += m.sum() * Ic.shape[0] 
 
         if torch.isnan(err_u / err_d):
             print('')
@@ -1743,3 +1817,4 @@ def ePIE_engine(iter_max, s_O, s_P,
         # print_and_log(f'Final Newton Decrement: {app_parameters["newton_decrement_history"][-1]:.3e}')
 
     return ePIE_Obj, ePIE_Prb, Prb_EW, ePIE_err, pc_mean_shift, posset, cbed_comparison, app_parameters
+

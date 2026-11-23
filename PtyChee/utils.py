@@ -41,7 +41,9 @@ def FFT_Log(objectFunc):
 
 def Power_Spectrum_Log(objectFunc):
     obj_fft = np.fft.fftshift(np.fft.fft2(objectFunc))
-    return np.log(np.abs(obj_fft*np.conj(obj_fft)))
+    power_spectrum = np.abs(obj_fft * np.conj(obj_fft))
+    safe_ps = np.clip(power_spectrum, a_min=1e-12, a_max=None)
+    return np.log(safe_ps)
 
 
 

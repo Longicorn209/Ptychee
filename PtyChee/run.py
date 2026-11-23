@@ -1,6 +1,6 @@
 """
 Author: Zeyu Wang
-Date: October 2026
+Date: November 2026
 Description: "PtyChee run scripts"
 """
 
@@ -9,7 +9,7 @@ from .findRotate import *
 from .iterPtycho import *
 from .analPtycho import *
 from .iCoM import *
-from .tcBF import *
+from .acBF import *
 from .vSTEM import *
 from .dimReduction import *
 from .output import *
@@ -118,6 +118,8 @@ def run_LSQML(file, data_4D, Voltage, alpha, scan_step, scan_rotation_angle, sca
         plot_cluster = False,                    # plot position clustering
         BF_threshold = 0.5,                      # for calclulating aperture radius
         forced_aperture_radius = None,           # pixels, force the aperture radius to the given value, set to None if not needed
+        noise_model='amplitude',                 # 'amplitude', 'poisson', 'gaussian' or 'anscombe'
+        detector_mask=None,                      # 2D NumPy mask matching the CBED size; 1 = included, 0 = excluded from the calculation      
         e_f = 1e-9,                              # epsilon for reciprocal space updating
         e_g = 1e-1,                              # epsilin for real space updating
         e_LSQ = 5e-1,                            # eplison for LSQ step calculation
@@ -146,8 +148,6 @@ def run_LSQML(file, data_4D, Voltage, alpha, scan_step, scan_rotation_angle, sca
         zblur_std = 0,                           # Å, z direction Gaussian blur standard deviation in Å
         rh_positive_phase = False,               # rh constraint: If True, all negative values in the phase result are clipped
         FFT_phase_offset = 0,                    # phase offset to remove donut shape
-
-        detector_mask = None,                    # 2D NumPy mask matching the CBED size; 1 = included, 0 = excluded from the calculation
 
         device = None,                           # specify the GPU device, or 'mps' for Apple, or use "cpu"
 
@@ -189,6 +189,8 @@ def run_LSQML(file, data_4D, Voltage, alpha, scan_step, scan_rotation_angle, sca
                 n_block = n_block, 
                 position_clustering = position_clustering, 
                 plot_cluster = plot_cluster,
+                noise_model = noise_model,
+                detector_mask = detector_mask,
                 e_f = e_f,
                 e_g = e_g,
                 e_LSQ = e_LSQ,
@@ -212,7 +214,6 @@ def run_LSQML(file, data_4D, Voltage, alpha, scan_step, scan_rotation_angle, sca
                 zblur_std = zblur_std,
                 rh_positive_phase = rh_positive_phase,
                 FFT_phase_offset = FFT_phase_offset,
-                detector_mask = detector_mask,
     )
     LSQML_Obj, LSQML_Prb, Prb_EW, LSQML_err, Obj_LSQ_step, Prb_LSQ_step, pc_mean_shift, posset_pc, cbed_comparison, app_parameters = LSQML_results
 
@@ -231,7 +232,7 @@ def run_LSQML(file, data_4D, Voltage, alpha, scan_step, scan_rotation_angle, sca
     if plot_and_save_probe:
         iterPtycho_proben_plot(LSQML_Prb, proben0, Prb_EW, scan_rotation_angle, scan_flip, data_shape, show_probe_comparison=show_probe_comparison, show_proben_Phase=show_proben_Phase, save_results=save_results)
     if s_position_correction:
-        position_correction_plot(pc_mean_shift, posset_pc, posset)
+        position_correction_plot(scan_rotation_angle, scan_flip, pc_mean_shift, posset_pc, posset)
     if s_apc_theta or s_apc_thickness:
         adaptive_propagator_plot(app_parameters, save_results=save_results)
     if s_apc_theta:
@@ -255,6 +256,8 @@ def run_ePIE(file, data_4D, Voltage, alpha, scan_step, scan_rotation_angle, scan
         plot_cluster = False,                    # plot position clustering
         BF_threshold = 0.5,                      # for calclulating aperture radius
         forced_aperture_radius = None,           # pixels, force the aperture radius to the given value, set to None if not needed
+        noise_model='amplitude',                 # 'amplitude', 'poisson', 'gaussian' or 'anscombe'
+        detector_mask=None,                      # 2D NumPy mask matching the CBED size; 1 = included, 0 = excluded from the calculation
         e_f = 1e-9,                              # epsilon for reciprocal space updating
         alpha_O = 0,                             # Alpha for rPIE Object; default is 0, which corresponds to ePIE
         alpha_P = 0,                             # Alpha for rPIE Probe; default is 0, which corresponds to ePIE
@@ -282,9 +285,7 @@ def run_ePIE(file, data_4D, Voltage, alpha, scan_step, scan_rotation_angle, scan
         kz_regularization = 0,                   # kz constraint for the 'missing cone problem'
         zblur_std = 0,                           # Å, z direction Gaussian blur standard deviation in Å
         rh_positive_phase = False,               # rh constraint: If True, all negative values in the phase result are clipped
-        FFT_phase_offset = 0,                    # phase offset to remove donut shape
-
-        detector_mask = None,                    # 2D NumPy mask matching the CBED size; 1 = included, 0 = excluded from the calculation
+        FFT_phase_offset = 0,                    # phase offset to remove donut shape              
 
         device = None,                           # specify the GPU device, or 'mps' for Apple, or use "cpu"
 
@@ -325,6 +326,8 @@ def run_ePIE(file, data_4D, Voltage, alpha, scan_step, scan_rotation_angle, scan
                 n_block = n_block, 
                 position_clustering = position_clustering, 
                 plot_cluster = plot_cluster,
+                noise_model = noise_model,
+                detector_mask = detector_mask,
                 e_f = e_f,
                 alpha_O=alpha_O,
                 alpha_P=alpha_P,
@@ -348,7 +351,6 @@ def run_ePIE(file, data_4D, Voltage, alpha, scan_step, scan_rotation_angle, scan
                 zblur_std = zblur_std,
                 rh_positive_phase = rh_positive_phase,
                 FFT_phase_offset = FFT_phase_offset,
-                detector_mask = detector_mask,
     )
     ePIE_Obj, ePIE_Prb, Prb_EW, ePIE_err, pc_mean_shift, posset_pc, cbed_comparison, app_parameters = ePIE_results
 
@@ -367,7 +369,7 @@ def run_ePIE(file, data_4D, Voltage, alpha, scan_step, scan_rotation_angle, scan
     if plot_and_save_probe:
         iterPtycho_proben_plot(ePIE_Prb, proben0, Prb_EW, scan_rotation_angle, scan_flip, data_shape, show_probe_comparison=show_probe_comparison, show_proben_Phase=show_proben_Phase, save_results=save_results)
     if s_position_correction:
-        position_correction_plot(pc_mean_shift, posset_pc, posset)
+        position_correction_plot(scan_rotation_angle, scan_flip, pc_mean_shift, posset_pc, posset)
     if s_apc_theta or s_apc_thickness:
         adaptive_propagator_plot(app_parameters, save_results=save_results)
     if s_apc_theta:
@@ -377,12 +379,16 @@ def run_ePIE(file, data_4D, Voltage, alpha, scan_step, scan_rotation_angle, scan
 
 
 
+
 def run_WDD(file, data_4D, Voltage, alpha, scan_step, scan_rotation_angle, scan_flip, 
-        defocus,
+        defocus,                                 # Å, a number: one reconstruction | a list / array: defocus section series (the FFT along p is done only once)
         epsilon_WDD = 0.1,                       # epsilon for calculating WDD
         plot_FFT = False,
         save_results = True,
 ):
+    defocus_list = np.atleast_1d(np.asarray(defocus, dtype=float)).ravel()
+    is_series = len(defocus_list) > 1
+
     print_and_log('')
     print_and_log(f'WDD')
     print_and_log(f'File: {file}')
@@ -391,7 +397,10 @@ def run_WDD(file, data_4D, Voltage, alpha, scan_step, scan_rotation_angle, scan_
     print_and_log(f'Voltage: {Voltage} kV')
     print_and_log(f'Alpha: {alpha} rad')
     print_and_log(f'scan step: {scan_step} Å/pixel')
-    print_and_log(f'defocus: {defocus} Å')
+    if is_series:
+        print_and_log(f'defocus: {defocus_list.tolist()} Å')
+    else:
+        print_and_log(f'defocus: {float(defocus_list[0])} Å')
     print_and_log(f'scan rotation angle: {scan_rotation_angle} degrees')
     print_and_log(f'scan flip x: {scan_flip}')
     
@@ -411,14 +420,17 @@ def run_WDD(file, data_4D, Voltage, alpha, scan_step, scan_rotation_angle, scan_
                aperture_radius, 
                reciprocalSpace_pixel_size, 
                Voltage, 
-               defocus,
+               defocus_list if is_series else float(defocus_list[0]),
                epsilon_WDD = epsilon_WDD,
                )
     
     print_and_log('')
     print_and_log(f'################### Saving and Ploting ###################')
-    WDD_plot(obj_fft, obj, plot_FFT=plot_FFT, save_results=save_results)
+    if is_series:
+        WDD_series_plot(obj_fft, obj, defocus_list, plot_FFT = plot_FFT, save_results=save_results)
+        return obj
 
+    WDD_plot(obj_fft, obj, plot_FFT=plot_FFT, save_results=save_results)
     return obj
 
 
@@ -522,41 +534,108 @@ def run_LINV3D(file, data_4D, Voltage, alpha, scan_step, scan_rotation_angle, sc
 
 
 
-def run_tcBF(file, data_4D, alpha, scan_step, scan_rotation_angle, scan_flip,
-        defocus,
+def run_acBF(file, data_4D, Voltage, alpha, scan_step, scan_rotation_angle, scan_flip,
+        defocus = None,                          # aberrations=None: the defocus used | aberrations='fit': initial guess for the fit | aberrations=dict: not needed
         inner_radius = 0,                        # inner radius for the annular ROI on CBED
         outer_radius = 1,                        # outer radius for the annular ROI on CBED
-        contrast_reverse = False,                # reverse contrast or not
+        BF_padding = 30,
+        ctf_correction = 'pre',                  # None: tcBF | 'pre': per-pixel correction before summation (acBF) | 'post': global filter after summation
+        ctf_method = 'wiener',                   # only used when ctf_correction='post': 'wiener' / 'phase_flip'
+        ctf_eps = 0.05,                          # only used when ctf_correction='post' and ctf_method='wiener'
+        contrast_reverse = False,
+        aberrations = None,                      # None: defocus only | 'fit': fit the aberrations from the shift map (fit results are plotted) | dict: coefficients returned by fit_aberrations
+        defocus_override = None,                 # Å, replace the defocus term (fitted or given) by this value; a list / array reconstructs a defocus section series (the fit is done only once)
+        fit_options = None,                      # dict of keyword arguments of fit_aberrations, e.g. dict(fit_order=2, qmax=0.4), only used when aberrations='fit'
         save_results = True,
 ):
     print_and_log('')
-    print_and_log(f'tcBF')
+    print_and_log(f'acBF')
     print_and_log(f'File: {file}')
     print_and_log('')
     print_and_log(f'################ Experimental Information ################')
+    print_and_log(f'Voltage: {Voltage} kV')
     print_and_log(f'Alpha: {alpha} rad')
     print_and_log(f'scan step: {scan_step} Å/pixel')
-    print_and_log(f'defocus: {defocus} Å')
+    if aberrations is None:
+        print_and_log(f'aberrations: defocus only, defocus = {defocus} Å')
+    elif isinstance(aberrations, str):
+        print_and_log(f'aberrations: fitted from the shift map, initial defocus = {defocus} Å, fit_options = {fit_options}')
+    else:
+        print_and_log(f'aberrations: given coefficients')
+    if defocus_override is not None:
+        print_and_log(f'defocus override: {defocus_override} Å')
     print_and_log(f'scan rotation angle: {scan_rotation_angle} degrees')
     print_and_log(f'scan flip x: {scan_flip}')
 
     *_ , aperture_radius, center_dx, center_dy = PACBED_identify(data_4D, BF_threshold=0.5)
 
-    Aligned_BF, intensity_min = tcBF(data_4D, alpha, scan_step, scan_rotation_angle, scan_flip, 
-                aperture_radius,
-                center_dx, 
-                center_dy,
-                defocus = defocus,
-                inner_radius = inner_radius, 
-                outer_radius = outer_radius,
-                contrast_reverse = contrast_reverse,
-                )
-    
+    if isinstance(aberrations, str) and aberrations == 'fit':
+        # fit only once, the fitted aberrations are reused for every defocus
+        aberrations, fit_info = fit_aberrations(data_4D, Voltage, alpha, scan_step, scan_rotation_angle, scan_flip,
+                    aperture_radius,
+                    center_dx,
+                    center_dy,
+                    defocus = defocus,
+                    return_info = True,
+                    **(fit_options or {}),
+                    )
+
+        print_and_log('')
+        print_and_log(f'################### Saving and Ploting ###################')
+        aberration_fit_plot(fit_info, save_results=save_results)
+
+    defocus_list = None if defocus_override is None else np.asarray(defocus_override, dtype=float).ravel()
+
+    if defocus_list is None or len(defocus_list) == 1:
+        Aligned_BF = acBF(data_4D, Voltage, alpha, scan_step, scan_rotation_angle, scan_flip,
+                    aperture_radius,
+                    center_dx,
+                    center_dy,
+                    defocus = defocus,
+                    inner_radius = inner_radius,
+                    outer_radius = outer_radius,
+                    BF_padding = BF_padding,
+                    ctf_correction = ctf_correction,
+                    ctf_method = ctf_method,
+                    ctf_eps = ctf_eps,
+                    contrast_reverse = contrast_reverse,
+                    aberrations = aberrations,
+                    defocus_override = None if defocus_list is None else float(defocus_list[0]),
+                    )
+
+        print_and_log('')
+        print_and_log(f'################### Saving and Ploting ###################')
+        aligned_BF_plot(Aligned_BF, name='acBF', save_results=save_results)
+
+        return Aligned_BF
+
+    Aligned_BF_series = []
+    for i, defocus_i in enumerate(defocus_list):
+        print_and_log('')
+        print_and_log(f'defocus section {i+1}/{len(defocus_list)}: {defocus_i} Å')
+
+        Aligned_BF_series.append(acBF(data_4D, Voltage, alpha, scan_step, scan_rotation_angle, scan_flip,
+                    aperture_radius,
+                    center_dx,
+                    center_dy,
+                    defocus = defocus,
+                    inner_radius = inner_radius,
+                    outer_radius = outer_radius,
+                    BF_padding = BF_padding,
+                    ctf_correction = ctf_correction,
+                    ctf_method = ctf_method,
+                    ctf_eps = ctf_eps,
+                    contrast_reverse = contrast_reverse,
+                    aberrations = aberrations,
+                    defocus_override = defocus_i,
+                    ))
+    Aligned_BF_series = np.stack(Aligned_BF_series)
+
     print_and_log('')
     print_and_log(f'################### Saving and Ploting ###################')
-    tcBF_plot(Aligned_BF, intensity_min, save_results=save_results)
+    aligned_BF_series_plot(Aligned_BF_series, defocus_list, name='acBF', save_results=save_results)
 
-    return Aligned_BF
+    return Aligned_BF_series, defocus_list
 
 
 
@@ -598,10 +677,11 @@ def run_NMF(file, data_4D,
         n_components, 
         iter_max = 1000,                         # maximum iteration number
         tol = 1e-7,                              # convergence tolerance
-        n_block = None,                          # block number for saving memory, default is 1
+        n_block = None,                          # minimum block number for saving memory, default is 1
         alpha_W = 0.0,                           # regularization strength for W
         alpha_H = 0.0,                           # regularization strength for H
         l1_ratio = 0.0,                          # L1/L2 regularization balance (0: L2, 1: L1)
+        n_inner = 3,                             # HALS coordinate sweeps per pass over the data (accelerated HALS)
 
         use_log_scale = False,                   # apply logarithmic scaling to the input data or not
 
@@ -619,8 +699,11 @@ def run_NMF(file, data_4D,
     print_and_log(f'Log Scale: {use_log_scale}')
 
     if use_log_scale:
-        data_4D[data_4D<0] = 0
-        data_4D = np.log(data_4D+1)
+        data_4D = np.log(np.maximum(data_4D, 0) + 1)
+    
+
+    print(data_4D.max())
+    print(data_4D.min())
         
     if n_block is None:
         n_block = 1
@@ -633,6 +716,7 @@ def run_NMF(file, data_4D,
         alpha_H = alpha_H, 
         l1_ratio = l1_ratio, 
         device = device,
+        n_inner = n_inner,
     )
 
     print_and_log('')
@@ -647,7 +731,9 @@ def run_NMF(file, data_4D,
 
 def run_PCA(file, data_4D, 
         n_components,
-        n_block = None,                          # block number for saving memory, default is 1
+        n_block = None,                          # minimum block number for saving memory, default is 1
+        n_oversamples = 10,                      # extra random vectors of the randomized SVD
+        n_power_iter = 2,                        # power iterations of the randomized SVD
 
         use_log_scale = False,                   # apply logarithmic scaling to the input data or not
 
@@ -664,8 +750,7 @@ def run_PCA(file, data_4D,
     print_and_log(f'Log Scale: {use_log_scale}')
 
     if use_log_scale:
-        data_4D[data_4D<0] = 0
-        data_4D = np.log(data_4D+1)
+        data_4D = np.log(np.maximum(data_4D, 0) + 1)
         
     if n_block is None:
         n_block = 1
@@ -673,6 +758,8 @@ def run_PCA(file, data_4D,
     W, H, Lambda = PCA(data_4D, n_components, 
         n_block = n_block, 
         device = device,
+        n_oversamples = n_oversamples,
+        n_power_iter = n_power_iter,
     )
 
     print_and_log('')
@@ -686,7 +773,9 @@ def run_ICA(file, data_4D,
         n_components, 
         iter_max = 1000,                         # maximum iteration number
         tol = 1e-7,                              # convergence tolerance
-        n_block = None,                          # block number for saving memory, default is 1
+        n_block = None,                          # minimum block number for saving memory, default is 1
+        n_oversamples = 10,                      # extra random vectors of the randomized SVD (whitening)
+        n_power_iter = 2,                        # power iterations of the randomized SVD (whitening)
 
         use_log_scale = False,                   # apply logarithmic scaling to the input data or not
 
@@ -704,8 +793,7 @@ def run_ICA(file, data_4D,
     print_and_log(f'Log Scale: {use_log_scale}')
 
     if use_log_scale:
-        data_4D[data_4D<0] = 0
-        data_4D = np.log(data_4D+1)
+        data_4D = np.log(np.maximum(data_4D, 0) + 1)
         
     if n_block is None:
         n_block = 1
@@ -715,6 +803,8 @@ def run_ICA(file, data_4D,
         tol = tol, 
         n_block = n_block, 
         device = device,
+        n_oversamples = n_oversamples,
+        n_power_iter = n_power_iter,
     )
 
     print_and_log('')
@@ -730,16 +820,20 @@ def run_INMF(file, data_4D,
         n_components, 
         iter_max = 1000,                         # maximum iteration number
         tol = 1e-7,                              # convergence tolerance
-        n_block = None,                          # block number for saving memory, default is 1
+        n_block = None,                          # minimum block number for saving memory, default is 1
         alpha_W = 0.0,                           # regularization strength for W
         alpha_H = 0.0,                           # regularization strength for H
         l1_ratio = 0.0,                          # L1/L2 regularization balance (0: L2, 1: L1)
+        n_inner = 3,                             # HALS coordinate sweeps per pass over the data (accelerated HALS)
 
-        independent_target = 'both',
-        independent_components = None,
-        independent_iter_max = 1000,
-        independent_lr = 1e-2,
-        lambda_ind = 0.1,
+        independent_target = 'W',                # 'W': spatial maps independent, 'H': detector patterns independent, 'none': plain NMF
+        independent_components = None,           # number of independent components, default is n_components
+        independent_iter_max = 1000,             # maximum iterations of the rotation search
+        independent_lr = 1.0,                    # initial step size of the rotation search (adapted automatically)
+        independent_beta = 1.0,                  # weight of the nonnegativity term of the non-independent side
+        independent_neg_tol = 0.0,               # negatives above -neg_tol * rms are not penalized (noise robustness)
+        independent_polish_iter = 20,            # HALS iterations after the rotation, 0 = only clamp
+        independent_tol = 1e-8,                  # convergence tolerance of the rotation search
 
         use_log_scale = False,                   # apply logarithmic scaling to the input data or not
 
@@ -755,25 +849,18 @@ def run_INMF(file, data_4D,
     print_and_log(f'NMF Components: {n_components}')
     print_and_log(f'Independent Components: {independent_components if independent_components is not None else n_components}')
     print_and_log(f'Independent Target: {independent_target}')
-    print_and_log(f'Independent Iterations: {independent_iter_max}')
-    print_and_log(f'Independent Learning Rate: {independent_lr}')
-    print_and_log(f'Independent Regularization: {lambda_ind}')
 
     PACBED_identify(data_4D, BF_threshold=0.5)
     print_and_log(f'Log Scale: {use_log_scale}')
 
     if use_log_scale:
-        data_4D[data_4D < 0] = 0
-        data_4D = np.log(data_4D + 1)
+        data_4D = np.log(np.maximum(data_4D, 0) + 1)
 
     if n_block is None:
         n_block = 1
 
     if independent_components is None:
         independent_components = n_components
-
-    if device is None or device == 'None':
-        device = 'cpu'
 
     W, H, err_list = fast_hals_NMF_independent(
         data_4D = data_4D,
@@ -789,8 +876,11 @@ def run_INMF(file, data_4D,
         independent_components = independent_components,
         independent_iter_max = independent_iter_max,
         independent_lr = independent_lr,
-        lambda_ind = lambda_ind,
-        independent_tol = tol,
+        independent_beta = independent_beta,
+        independent_neg_tol = independent_neg_tol,
+        independent_polish_iter = independent_polish_iter,
+        independent_tol = independent_tol,
+        n_inner = n_inner,
     )
 
     print_and_log('')

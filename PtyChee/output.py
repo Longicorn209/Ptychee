@@ -1,6 +1,6 @@
 """
 Author: Zeyu Wang
-Date: October 2026
+Date: November 2026
 Description: "results plotting and saving"
 """
 
@@ -472,11 +472,11 @@ def iterPtycho_objFunc_plot(objectn, scan_rotation_angle, scan_flip, ptycho_move
 
 
 
-def position_correction_plot(pc_mean_shift, posset_pc, posset, save_results=True):
+def position_correction_plot(scan_rotation_angle, scan_flip, pc_mean_shift, posset_pc, posset, save_results=True):
 
     _LOG_DIR = print_and_log("PC saving")
 
-    updated = np.flatnonzero(pc_mean_shift)     # the positions are updated only once every few iterations
+    updated = np.flatnonzero(pc_mean_shift)
 
     plt.figure(figsize=(6,4))
     plt.plot(updated, pc_mean_shift[updated], marker='o', markersize=3)
@@ -490,17 +490,49 @@ def position_correction_plot(pc_mean_shift, posset_pc, posset, save_results=True
     plt.tight_layout()
 
     if save_results:
-        #np.save(os.path.join(_LOG_DIR, "pc_mean_shift.npy"), pc_mean_shift)
         outfile = os.path.join(_LOG_DIR, "pc_mean_shift.png")
         plt.savefig(outfile, dpi=300)
 
     plt.show()
 
+    theta_r = np.pi * scan_rotation_angle / 180
 
-    plt.scatter(posset[:,3], -posset[:,2], color='red', label='original')
-    plt.scatter(posset_pc[:,3], -posset_pc[:,2], color='black', label='corrected')
+    if scan_flip:
+        theta_r *= -1
+
+    R_ccw_array = np.array([
+        [np.cos(theta_r), np.sin(theta_r)],
+        [-np.sin(theta_r), np.cos(theta_r)]
+    ])
+
+    R_inv = R_ccw_array.T
+
+    def inverse_transform(posset):
+
+        positions = posset[:, 2:4].copy()
+
+        # Inverse flip
+        if scan_flip:
+            positions[:, 1] = np.max(positions[:, 1]) - positions[:, 1]
+
+        # Inverse rotation
+        positions = np.dot(R_inv, positions.T).T
+
+        return positions
+
+    pos_original = inverse_transform(posset)
+    pos_corrected = inverse_transform(posset_pc)
+
+    plt.figure(figsize=(6,4))
+
+    plt.scatter(pos_original[:, 1], -pos_original[:, 0], color='red', label='original')
+    plt.scatter(pos_corrected[:, 1], -pos_corrected[:, 0], color='black', label='corrected')
+
     plt.legend()
     plt.axis('equal')
+
+    plt.xticks([])
+    plt.yticks([])
 
     plt.tight_layout()
 
@@ -509,6 +541,83 @@ def position_correction_plot(pc_mean_shift, posset_pc, posset, save_results=True
         plt.savefig(outfile, dpi=300)
 
     plt.show()
+
+# def position_correction_plot(pc_mean_shift, posset_pc, posset, save_results=True):
+
+#     _LOG_DIR = print_and_log("PC saving")
+
+#     updated = np.flatnonzero(pc_mean_shift)
+
+#     fig, ax = plt.subplots(figsize=(6, 4))
+
+#     ax.plot(updated, pc_mean_shift[updated], marker='o', markersize=3)
+
+#     ax.set_xlabel("Iteration")
+#     ax.set_ylabel("pixels")
+#     ax.set_title("scanning position mean shift")
+
+#     ax.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+
+#     fig.tight_layout()
+
+#     if save_results:
+#         outfile = os.path.join(_LOG_DIR, "pc_mean_shift.png")
+#         fig.savefig(outfile, dpi=300)
+
+#     plt.show()
+
+#     fig, ax = plt.subplots(figsize=(8, 6))
+
+#     # Number of scanning positions
+#     n_original = len(posset)
+#     n_corrected = len(posset_pc)
+#     n_points = max(n_original, n_corrected)
+
+#     # Calculate actual plotting area in points^2
+#     fig.canvas.draw()
+
+#     bbox = ax.get_window_extent()
+#     width_pt = bbox.width * 72 / fig.dpi
+#     height_pt = bbox.height * 72 / fig.dpi
+#     area_pt = width_pt * height_pt
+
+#     # Adaptive marker size
+#     marker_size = np.clip(0.35 * area_pt / max(n_points, 1),  0.15, 8.0)
+
+#     # Adaptive transparency
+#     alpha = np.clip(0.65 * np.sqrt(1000 / max(n_points, 1)), 0.15, 0.65)
+
+#     # Original positions
+#     ax.scatter(posset[:, 3], -posset[:, 2], s=marker_size, color='red',
+#         # alpha=alpha,
+#         edgecolors='none',
+#         rasterized=True,
+#         label='original',
+#         zorder=2,
+#     )
+#     # Corrected positions
+#     ax.scatter(posset_pc[:, 3], -posset_pc[:, 2], s=marker_size, color='black',
+#         # alpha=alpha,
+#         edgecolors='none',
+#         rasterized=True,
+#         label='corrected',
+#         zorder=1,
+#     )
+
+
+#     ax.legend(markerscale=5)
+#     ax.set_aspect('equal', adjustable='datalim')
+
+#     ax.set_xlabel("X (pixels)")
+#     ax.set_ylabel("Y (pixels)")
+
+#     fig.tight_layout()
+
+#     if save_results:
+#         outfile = os.path.join(_LOG_DIR, "Scan Position Comparison.png")
+#         fig.savefig(outfile, dpi=300)
+
+#     plt.show()
 
 
 
@@ -832,6 +941,90 @@ def WDD_plot(obj_fft, obj, plot_FFT=False, save_results=True):
 
 
 
+def WDD_series_plot(obj_fft, obj_series, defocus_list, plot_FFT=False, save_results=True):
+
+    _LOG_DIR = print_and_log("WDD defocus series saving")
+
+    n_slice, sy, sx = obj_series.shape
+
+    obj_phase = np.angle(obj_series).astype(dtype=np.float32)
+    obj_abs = np.abs(obj_series).astype(dtype=np.float32)
+
+    if save_results:
+        tifffile.imwrite(os.path.join(_LOG_DIR, "WDD_phase_series.tif"), obj_phase, photometric='minisblack')
+        tifffile.imwrite(os.path.join(_LOG_DIR, "WDD_amplitude_series.tif"), obj_abs, photometric='minisblack')
+        np.save(os.path.join(_LOG_DIR, "WDD_Obj_Complex_series.npy"), obj_series)
+        # np.savetxt(os.path.join(_LOG_DIR, "WDD_series_defocus_list.txt"), defocus_list)
+
+    if plot_FFT:
+        obj_fft = obj_fft[n_slice//2]
+
+        fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+
+        im1 = axes[0].imshow(np.log(np.abs(obj_fft)+1e-5), cmap='gray')
+        axes[0].set_title('Amplitude Obj_FFT (log)')
+        axes[0].set_xticks([])
+        axes[0].set_yticks([])
+
+        divider1 = make_axes_locatable(axes[0])
+        cax1 = divider1.append_axes("right", size="5%", pad=0.2)
+        fig.colorbar(im1, cax=cax1)
+
+        im2 = axes[1].imshow(np.angle(obj_fft), cmap='gray')
+        axes[1].set_title('Phase Obj_FFT')
+        axes[1].set_xticks([])
+        axes[1].set_yticks([])
+
+        divider2 = make_axes_locatable(axes[1])
+        cax2 = divider2.append_axes("right", size="5%", pad=0.2)
+        fig.colorbar(im2, cax=cax2)
+
+        plt.tight_layout()
+
+        if save_results:
+            outfile = os.path.join(_LOG_DIR, f"WDD_Object_FFT_at_df{defocus_list[n_slice//2]}.png")
+            plt.savefig(outfile, dpi=300)
+
+        plt.show()
+    
+
+    object_shown_rows, object_shown_cols = get_subplot_grid(n_slice)
+
+    Pmin, Pmax = obj_phase.min(), obj_phase.max()
+    P_norm = plt.Normalize(vmin=Pmin, vmax=Pmax)
+
+    fig, axes = plt.subplots(
+                object_shown_rows,
+                object_shown_cols,
+                figsize=(object_shown_cols*4.7, object_shown_rows*4),
+                constrained_layout=False
+                )
+    axes = np.array([axes]).flatten()
+
+    for ax in axes[n_slice:]:
+        ax.axis("off")
+
+    fig.subplots_adjust(wspace=0.2, hspace=0.2, left=0.03, right=0.85, top=0.97, bottom=0.03)  
+    cbar_ax = fig.add_axes([0.88, 0.03, 0.02, 0.94])  # [left, bottom, width, height]
+
+    sm = plt.cm.ScalarMappable(cmap='gray', norm=P_norm)
+    sm.set_array([])
+    fig.colorbar(sm, cax=cbar_ax, label="Phase [rad]")
+
+    for i in range(n_slice):
+        axes[i].imshow(obj_phase[i], cmap='gray', vmin=Pmin, vmax=Pmax)
+        axes[i].set_title(f'Defocus {defocus_list[i]:g} Å', fontsize=10)
+        axes[i].set_xticks([])
+        axes[i].set_yticks([])
+
+    if save_results:
+        outfile = os.path.join(_LOG_DIR, "WDD_series.png")
+        plt.savefig(outfile, dpi=300)
+
+    plt.show()
+
+
+
 def SSB_plot(obj_fft, obj, plot_FFT=False, save_results=True):
 
     _LOG_DIR = print_and_log("SSB saving")
@@ -984,40 +1177,187 @@ def LINV3D_plot(obj_fft, obj, z_list, save_results=True):
 
 
 
-def tcBF_plot(Aligned_BF, intensity_min, save_results=True):
+def aligned_BF_plot(Aligned_BF, name='acBF', save_results=True, cmap='gray'):
 
-    _LOG_DIR = print_and_log("tcBF saving")
+    _LOG_DIR = print_and_log(f"{name} saving")
     if save_results:
-        tifffile.imwrite(os.path.join(_LOG_DIR, "tcBF.tif"), Aligned_BF.astype(dtype=np.float32))
+        tifffile.imwrite(os.path.join(_LOG_DIR, f"{name}.tif"), Aligned_BF.astype(np.float32))
 
-    tcBF_PS = Power_Spectrum_Log(Aligned_BF)
-
+    PS = Power_Spectrum_Log(Aligned_BF)
 
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
 
-    im1 = axes[0].imshow(Aligned_BF, cmap='gray')
-    im1.set_clim([intensity_min, np.max(Aligned_BF)])
-    axes[0].set_title('tcBF')
+    im1 = axes[0].imshow(Aligned_BF, cmap=cmap)
+    axes[0].set_title(name)
     axes[0].set_xticks([])
     axes[0].set_yticks([])
-
-    divider1 = make_axes_locatable(axes[0])
-    cax1 = divider1.append_axes("right", size="5%", pad=0.2)
+    cax1 = make_axes_locatable(axes[0]).append_axes("right", size="5%", pad=0.2)
     fig.colorbar(im1, cax=cax1)
 
-    im2 = axes[1].imshow(tcBF_PS, cmap='gray')
-    axes[1].set_title('tcBF Power Spectrum (log)')
+    im2 = axes[1].imshow(PS, cmap=cmap)
+    axes[1].set_title(f'{name} Power Spectrum (log)')
     axes[1].set_xticks([])
     axes[1].set_yticks([])
-
-    divider2 = make_axes_locatable(axes[1])
-    cax2 = divider2.append_axes("right", size="5%", pad=0.2)
+    cax2 = make_axes_locatable(axes[1]).append_axes("right", size="5%", pad=0.2)
     fig.colorbar(im2, cax=cax2)
 
     plt.tight_layout()
 
     if save_results:
-        outfile = os.path.join(_LOG_DIR, "tcBF.png")
+        plt.savefig(os.path.join(_LOG_DIR, f"{name}.png"), dpi=300)
+
+    plt.show()
+
+
+
+
+def aberration_fit_plot(info, save_results=True):
+
+    _LOG_DIR = print_and_log("Aberration fit saving")
+
+    dy, dx = info['dy'], info['dx']
+    jj, ii = info['jj'], info['ii']
+    coeffs = info['coeffs']
+    history = info['history']
+    alpha_mrad = info['alpha'] * 1000
+
+    def to_detector_map(values):
+        detector_map = np.full((dy, dx), np.nan)
+        detector_map[jj, ii] = values
+        return detector_map
+
+    shift_measured = info['shift_measured']
+    shift_fit = info['shift_fit']
+    axis_names = ['x', 'y']
+
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+
+    shift_maps = []
+    for k in range(2):
+        maps = [to_detector_map(shift_measured[:, k]),
+                to_detector_map(shift_fit[:, k]),
+                to_detector_map(shift_measured[:, k] - shift_fit[:, k])]
+        shift_maps.append(maps)
+
+        vmax = max(np.nanmax(np.abs(maps[0])), np.nanmax(np.abs(maps[1])), 1e-12)
+        vmax_residual = max(np.nanmax(np.abs(maps[2])), 1e-12)
+        titles = [f'{axis_names[k]} shift measured', f'{axis_names[k]} shift fitted', f'{axis_names[k]} shift residual']
+
+        for j in range(3):
+            v = vmax_residual if j == 2 else vmax
+            im = axes[k, j].imshow(maps[j], cmap='RdBu_r', vmin=-v, vmax=v)
+            axes[k, j].set_title(titles[j])
+            axes[k, j].set_xticks([])
+            axes[k, j].set_yticks([])
+
+            divider = make_axes_locatable(axes[k, j])
+            cax = divider.append_axes('right', size='5%', pad=0.05)
+            cbar = plt.colorbar(im, cax=cax)
+            cbar.set_label('pixels')
+
+    plt.tight_layout()
+
+    if save_results:
+        np.save(os.path.join(_LOG_DIR, "Aberration_Fit_Shift_Map.npy"),
+                np.stack([shift_maps[0][0], shift_maps[1][0], shift_maps[0][1], shift_maps[1][1]]))    # measured x, measured y, fitted x, fitted y
+        outfile = os.path.join(_LOG_DIR, "Aberration_Fit_Shift_Map.png")
+        fig.savefig(outfile, dpi=300)
+
+    plt.show()
+
+
+    fig, axes = plt.subplots(2, 2, figsize=(10, 8))
+
+    chi_maps = [info['chi'], info['chi_wo_defocus']]
+    chi_titles = [f'aberration function (rad), aperture {alpha_mrad:.1f} mrad', 'aberration function without defocus (rad)']
+
+    for j in range(2):
+        vmax = max(np.nanmax(np.abs(chi_maps[j])), 1e-12)
+        im = axes[0, j].imshow(chi_maps[j], cmap='RdBu_r', vmin=-vmax, vmax=vmax)
+        axes[0, j].set_title(chi_titles[j])
+        axes[0, j].set_xticks([])
+        axes[0, j].set_yticks([])
+
+        divider = make_axes_locatable(axes[0, j])
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        cbar = plt.colorbar(im, cax=cax)
+        cbar.set_label('rad')
+
+    im = axes[1, 0].imshow(to_detector_map(info['rho']), cmap='gray', vmin=0, vmax=1)
+    axes[1, 0].set_title('correlation of the virtual images')
+    axes[1, 0].set_xticks([])
+    axes[1, 0].set_yticks([])
+
+    divider = make_axes_locatable(axes[1, 0])
+    cax = divider.append_axes('right', size='5%', pad=0.05)
+    plt.colorbar(im, cax=cax)
+
+    axes[1, 1].semilogy(history['iteration'], history['rms_shift_update'], marker='o', markersize=3, label='rms shift update')
+    axes[1, 1].semilogy(history['iteration'], history['rms_fit_residual'], marker='o', markersize=3, label='rms fit residual')
+    axes[1, 1].set_xlabel('Iteration')
+    axes[1, 1].set_ylabel('pixels')
+    axes[1, 1].set_title('Fit Convergence')
+    axes[1, 1].xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+    axes[1, 1].legend()
+    axes[1, 1].grid(alpha=0.3)
+
+    plt.tight_layout()
+
+    if save_results:
+        with open(os.path.join(_LOG_DIR, "Aberration_Coefficients.txt"), 'w') as f:
+            f.write('# name  coefficient (A), defocus > 0: crossover after the sample\n')
+            for name, value in coeffs.items():
+                f.write(f'{name} {value:.8g}\n')
+        outfile = os.path.join(_LOG_DIR, "Aberration_Fit_Summary.png")
+        fig.savefig(outfile, dpi=300)
+
+    plt.show()
+
+
+
+
+def aligned_BF_series_plot(Aligned_BF_series, defocus_list, name='acBF', save_results=True, cmap='gray'):
+
+    _LOG_DIR = print_and_log(f"{name} defocus series saving")
+
+    n_slice, sy, sx = Aligned_BF_series.shape
+    series = Aligned_BF_series.astype(dtype=np.float32)
+
+    if save_results:
+        tifffile.imwrite(os.path.join(_LOG_DIR, f"{name}_series.tif"), series, photometric='minisblack')
+        # np.savetxt(os.path.join(_LOG_DIR, f"{name}_series_defocus_list.txt"), defocus_list)
+
+    series_shown_rows, series_shown_cols = get_subplot_grid(n_slice)
+
+    Imin, Imax = series.min(), series.max()
+    I_norm = plt.Normalize(vmin=Imin, vmax=Imax)
+
+    fig, axes = plt.subplots(
+                series_shown_rows,
+                series_shown_cols,
+                figsize=(series_shown_cols*4.7, series_shown_rows*4),
+                constrained_layout=False
+                )
+    axes = np.array([axes]).flatten()
+
+    for ax in axes[n_slice:]:
+        ax.axis("off")
+
+    fig.subplots_adjust(wspace=0.2, hspace=0.2, left=0.03, right=0.85, top=0.97, bottom=0.03)  
+    cbar_ax = fig.add_axes([0.88, 0.03, 0.02, 0.94])  # [left, bottom, width, height]
+
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=I_norm)
+    sm.set_array([])
+    fig.colorbar(sm, cax=cbar_ax, label="Intensity [a.u.]")
+
+    for i in range(n_slice):
+        axes[i].imshow(series[i], cmap=cmap, vmin=Imin, vmax=Imax)
+        axes[i].set_title(f'Defocus {defocus_list[i]:g} Å', fontsize=10)
+        axes[i].set_xticks([])
+        axes[i].set_yticks([])
+
+    if save_results:
+        outfile = os.path.join(_LOG_DIR, f"{name}_series.png")
         plt.savefig(outfile, dpi=300)
 
     plt.show()

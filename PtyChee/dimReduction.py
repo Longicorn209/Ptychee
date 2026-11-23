@@ -4,6 +4,7 @@ Date: October 2026
 Description: "analytical ptychogrphay"
 """
 
+import math
 import numpy as np
 import time
 import torch
@@ -14,120 +15,382 @@ from .utils import print_and_log, log_to_file, get_subplot_grid, RGB_Complex_Plo
 
 
 
-# @torch.no_grad()
-def nndsvd_init(X, rank, seed=0, device=None):
+# ==========================================================================
+# Common helpers
+# ==========================================================================
 
-    if device is None:
-        device = 'cpu'
+def _resolve_device(device):
 
-    torch.manual_seed(seed)
+    if device is None or device == 'None':
+        return torch.device('cpu')
 
-    U, S, V = torch.pca_lowrank(
-        X, q=rank, center=False, niter=2
-    )
+    return torch.device(device)
 
-    U = U[:, :rank]
-    S = S[:rank]
-    V = V[:, :rank]
 
-    W = torch.zeros((X.shape[0], rank), dtype=torch.float32)
-    H = torch.zeros((rank, X.shape[1]), dtype=torch.float32)
+
+
+def _f64(x):
+
+    # MPS has no float64, fall back to CPU for the (small) high-precision reductions.
+    if x.device.type == 'mps':
+        return x.cpu().double()
+
+    return x.double()
+
+
+
+
+def _prepare_matrix(data_4D, nonneg=False):
+
+    sy, sx, dy, dx = data_4D.shape
+    X_np = np.ascontiguousarray(data_4D.reshape(-1, dy * dx), dtype=np.float32)
+
+    # Only copy when there is something to fix, the input array is never modified.
+    if not np.isfinite(X_np).all():
+        print_and_log('Warning: input data contains NaN/Inf, they are replaced by 0.')
+        X_np = np.nan_to_num(X_np, nan=0.0, posinf=0.0, neginf=0.0)
+
+    if nonneg and X_np.min() < 0:
+        X_np = np.maximum(X_np, 0)
+
+    return X_np
+
+
+
+
+class BlockedMatrix:
+
+    """
+    Row-blocked view of a CPU matrix X (N x M).
+    Iterating yields (start, end, X_block_on_device).
+    If the whole matrix fits into one block and the device is not the CPU,
+    X is moved to the device only once and reused by every pass.
+    n_block is the minimum number of blocks, the block size is also capped by max_block_bytes.
+    """
+
+    def __init__(self, X_np, n_block, device, max_block_bytes=2**30):
+
+        if not isinstance(n_block, int) or n_block < 1:
+            raise ValueError('n_block must be a positive integer.')
+
+        self.X = torch.from_numpy(X_np)
+        self.N, self.M = self.X.shape
+        self.device = torch.device(device)
+
+        rows_max = max(1, int(max_block_bytes // (4 * self.M)))
+        self.block_size = max(1, min((self.N + n_block - 1) // n_block, rows_max))
+
+        self.cached = None
+        if self.block_size >= self.N and self.device.type != 'cpu':
+            self.cached = self.X.to(self.device)
+
+    def __iter__(self):
+
+        if self.cached is not None:
+            yield 0, self.N, self.cached
+            return
+
+        for start in range(0, self.N, self.block_size):
+            end = min(start + self.block_size, self.N)
+            yield start, end, self.X[start:end].to(self.device, non_blocking=True)
+
+
+
+
+def _chunked_norms(X, chunk=1 << 20):
+
+    # L2 norms of fixed-size chunks (short accumulation chains, float64 inside the chunk where the device has it);
+    # the caller sums their squares in float64. A single float32 reduction over ~1e8 elements can be off by several percent.
+    flat = X.reshape(-1)
+    dt = None if X.device.type == 'mps' else torch.float64
+
+    return torch.stack([torch.linalg.vector_norm(flat[i:i + chunk], dtype=dt) for i in range(0, flat.numel(), chunk)])
+
+
+
+
+@torch.no_grad()
+def _exact_residual_sq(blocks, Wt, H, rows=1024):
+
+    # ||X - W H||_F^2 computed explicitly (one extra pass), used when the fast formula is unreliable.
+    parts = []
+
+    for start, end, Xb in blocks:
+        for a in range(0, end - start, rows):
+            b = min(a + rows, end - start)
+            R = Xb[a:b] - Wt[:, start + a:start + b].T @ H
+            parts.append(_chunked_norms(R))
+
+    return (torch.cat(parts).cpu().double() ** 2).sum().item()
+
+
+
+
+@torch.no_grad()
+def _block_stats(blocks):
+
+    # Column sums (float64, CPU) and ||X||_F^2 (float64). One pass, no per-block sync.
+    sums = []
+    norms = []
+
+    for start, end, Xb in blocks:
+        sums.append(Xb.sum(dim=0))
+        norms.append(_chunked_norms(Xb))
+
+    col_sum = torch.stack(sums).cpu().double().sum(dim=0)
+    sum_sq = (torch.cat(norms).cpu().double() ** 2).sum().item()
+
+    return col_sum, sum_sq
+
+
+
+
+def _progress_str(label, i, iter_max, time_i0, start_time):
+
+    time_is = time.perf_counter() - time_i0
+    speed = 1 / max(time_is, 1e-12)
+    process = (i + 1) / iter_max * 100
+    aa = "*" * int(process / 10)
+    bb = "." * (10 - int(process / 10))
+    dur = int(time.perf_counter() - start_time)
+    time_remain = int((iter_max - i - 1) * time_is)
+    dur_h, dur_rem = divmod(dur, 3600)
+    dur_m, dur_s = divmod(dur_rem, 60)
+    time_remain_h, time_remain_rem = divmod(time_remain, 3600)
+    time_remain_m, time_remain_s = divmod(time_remain_rem, 60)
+
+    return "{} progressing: {:^3.0f}%[{}->{}] {:.2f}iter/s ({:0>2}:{:0>2}:{:0>2}<{:0>2}:{:0>2}:{:0>2})".format(label, process, aa, bb, speed, dur_h, dur_m, dur_s, time_remain_h, time_remain_m, time_remain_s)
+
+
+
+
+def _mean_abs_corr(F):
+
+    # F: (K, n), every row is one component.
+    K = F.shape[0]
+
+    if K < 2:
+        return 0.0
+
+    C = torch.nan_to_num(torch.corrcoef(_f64(F)))
+    mask = ~torch.eye(K, dtype=torch.bool, device=C.device)
+
+    return C[mask].abs().mean().item()
+
+
+
+
+def _fix_sign(U, V):
+
+    # Deterministic sign convention: the largest-magnitude entry of every V column is positive.
+    idx = torch.argmax(V.abs(), dim=0)
+    sign = torch.sign(V[idx, torch.arange(V.shape[1], device=V.device)])
+    sign = torch.where(sign == 0, torch.ones_like(sign), sign)
+
+    return U * sign[None, :], V * sign[None, :]
+
+
+def _check_output(W, H, label):
+
+    # Report NaN/Inf and all-zero components instead of failing silently later in the plots.
+    if not (np.isfinite(W).all() and np.isfinite(H).all()):
+        print_and_log(f'Warning: {label} output contains NaN/Inf.')
+
+    dead = [k for k in range(W.shape[0]) if not W[k].any() or not H[k].any()]
+
+    if len(dead) > 0:
+        print_and_log(f'Warning: {label} components {dead} are entirely zero.')
+
+
+
+
+
+
+# ==========================================================================
+# Randomized PCA core, shared by PCA / ICA / NNDSVD
+# ==========================================================================
+
+@torch.no_grad()
+def _randomized_pca(blocks, K, n_oversamples, n_power_iter, dev, random_state, center=True, stats=None):
+
+    """
+    Randomized truncated SVD of Xc (centered if center=True) without ever forming Xc.
+    Subspace iteration ends on the right side (Xc ~ Xc Z Z^T), so no extra pass is
+    needed for B = Q^T Xc or for the scores.
+
+    Number of passes over X: 2 * n_power_iter + 1  (+1 if stats is not given).
+
+    Returns U (N x K, orthonormal columns), S (K), V (M x K), mean (M), ||Xc||_F^2.
+    """
+
+    N, M = blocks.N, blocks.M
+    L = min(K + n_oversamples, N, M)
+
+    if stats is None:
+        stats = _block_stats(blocks)
+
+    col_sum, sum_sq = stats
+
+    if center:
+        mean64 = col_sum / N
+        mean = mean64.to(torch.float32).to(dev)
+        total_sq = max(sum_sq - N * mean64.square().sum().item(), 0.0)
+    else:
+        mean = torch.zeros(M, dtype=torch.float32, device=dev)
+        total_sq = sum_sq
+
+    # Random start generated on the CPU so that the result does not depend on the device.
+    g = torch.Generator().manual_seed(random_state)
+    Z = torch.randn(M, L, generator=g, dtype=torch.float32).to(dev)
+    Z, _ = torch.linalg.qr(Z, mode='reduced')
+
+    for i in range(n_power_iter + 1):
+
+        # Y = Xc @ Z = X @ Z - 1 (mean @ Z)
+        mZ = mean @ Z
+        Y = torch.empty((N, L), dtype=torch.float32, device=dev)
+
+        for start, end, Xb in blocks:
+            Y[start:end] = Xb @ Z - mZ
+
+        Q, R = torch.linalg.qr(Y, mode='reduced')
+
+        if i < n_power_iter:
+            # Z = Xc.T @ Q = X.T @ Q - mean (1^T Q)
+            Zn = torch.zeros((M, L), dtype=torch.float32, device=dev)
+
+            for start, end, Xb in blocks:
+                Zn += Xb.T @ Q[start:end]
+
+            Zn -= mean[:, None] * Q.sum(dim=0)[None, :]
+            Z, _ = torch.linalg.qr(Zn, mode='reduced')
+
+    # Xc ~ Y Z^T = Q R Z^T = (Q Ur) S (Z Vr)^T
+    Ur, S_all, Vrh = torch.linalg.svd(R, full_matrices=False)
+
+    U = Q @ Ur[:, :K]
+    S = S_all[:K]
+    V = Z @ Vrh[:K].T
+
+    return U, S, V, mean, total_sq
+
+
+
+
+
+# ==========================================================================
+# NMF
+# ==========================================================================
+
+@torch.no_grad()
+def nndsvd_init(X, rank, seed=0, device=None, stats=None):
+
+    # X can be a CPU torch tensor (N x M) or a BlockedMatrix.
+    if isinstance(X, BlockedMatrix):
+        blocks = X
+        dev = blocks.device
+    else:
+        dev = _resolve_device(device)
+        X_np = np.ascontiguousarray(torch.as_tensor(X).cpu().numpy(), dtype=np.float32)
+        blocks = BlockedMatrix(X_np, 1, dev)
+
+    N, M = blocks.N, blocks.M
+
+    if stats is None:
+        stats = _block_stats(blocks)
+
+    avg = stats[0].sum().item() / (N * M)
+
+    # Leading singular triplets of X itself (no centering).
+    U, S, V, _, _ = _randomized_pca(blocks, rank, 10, 2, dev, seed, center=False, stats=stats)
+
+    # Positive / negative parts of every singular vector pair.
+    u_pos = U.clamp(min=0)
+    u_neg = (-U).clamp(min=0)
+    v_pos = V.clamp(min=0)
+    v_neg = (-V).clamp(min=0)
+
+    n_up = torch.linalg.vector_norm(u_pos, dim=0)
+    n_un = torch.linalg.vector_norm(u_neg, dim=0)
+    n_vp = torch.linalg.vector_norm(v_pos, dim=0)
+    n_vn = torch.linalg.vector_norm(v_neg, dim=0)
+
+    # Choose the positive or negative parts according to the larger product of their norms.
+    use_pos = (n_up * n_vp) >= (n_un * n_vn)
+
+    u_sel = torch.where(use_pos[None, :], u_pos, u_neg)
+    v_sel = torch.where(use_pos[None, :], v_pos, v_neg)
+    norm_u = torch.where(use_pos, n_up, n_un)
+    norm_v = torch.where(use_pos, n_vp, n_vn)
+
+    valid = ((norm_u > 1e-12) & (norm_v > 1e-12)).to(torch.float32)
+    scale = torch.sqrt(S * norm_u * norm_v)
+
+    W = u_sel / norm_u.clamp_min(1e-12)[None, :] * (scale * valid)[None, :]
+    Hm = v_sel / norm_v.clamp_min(1e-12)[None, :] * (scale * valid)[None, :]
 
     # First component: absolute leading singular vectors.
     W[:, 0] = torch.sqrt(S[0]) * U[:, 0].abs()
-    H[0, :] = torch.sqrt(S[0]) * V[:, 0].abs()
+    Hm[:, 0] = torch.sqrt(S[0]) * V[:, 0].abs()
 
-    # Remaining components: choose the positive or negative
-    # parts according to the larger product of their norms.
-    for k in range(1, rank):
-        u = U[:, k]
-        v = V[:, k]
-
-        u_pos = torch.clamp(u, min=0)
-        u_neg = torch.clamp(-u, min=0)
-        v_pos = torch.clamp(v, min=0)
-        v_neg = torch.clamp(-v, min=0)
-
-        n_up = torch.linalg.vector_norm(u_pos)
-        n_un = torch.linalg.vector_norm(u_neg)
-        n_vp = torch.linalg.vector_norm(v_pos)
-        n_vn = torch.linalg.vector_norm(v_neg)
-
-        score_pos = n_up * n_vp
-        score_neg = n_un * n_vn
-
-        if score_pos >= score_neg:
-            u_sel, v_sel = u_pos, v_pos
-            norm_u, norm_v = n_up, n_vp
-        else:
-            u_sel, v_sel = u_neg, v_neg
-            norm_u, norm_v = n_un, n_vn
-
-        if norm_u > 1e-12 and norm_v > 1e-12:
-            scale = torch.sqrt(S[k] * norm_u * norm_v)
-            W[:, k] = scale * u_sel / norm_u
-            H[k, :] = scale * v_sel / norm_v
+    H = Hm.T.contiguous()
 
     # Small positive initialization for zero entries.
-    avg = X.mean().item()
     eps = max(avg * 1e-3, 1e-6)
     W[W == 0] = eps
     H[H == 0] = eps
 
-    return W.to(device), H.to(device)
+    return W, H
 
 
 
 
-# @torch.no_grad()
-def fast_hals_NMF(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, alpha_W=0.0, alpha_H=0.0, l1_ratio=0.0, device='None'):
+@torch.no_grad()
+def _hals_nmf_torch(blocks, n_components, iter_max, tol, n_inner, alpha_W, alpha_H, l1_ratio, stats, init=None, label='NMF', random_state=0):
 
-    if device is None:
-        device = "cpu"
+    """
+    Fast HALS NMF on the device. Wt is stored as (K, N) so that every row update is contiguous.
+    n_inner > 1 gives accelerated HALS: several coordinate sweeps are done on the small
+    Gram matrices per pass over X, which is almost free compared with a pass over X.
 
-    print_and_log('')
-    print_and_log('##################### NMF Parameters ######################')
-    print_and_log(f"Device Using: {device}")
-    print_and_log(f'NMF Components Number: {n_components}')
-    print_and_log(f'Number of Iterations: {iter_max}')
-    print_and_log(f'NMF Convergence Tolerance: {tol}')
-    print_and_log(f'NMF Block Number: {n_block}')
-    print_and_log(f'NMF alpha_W: {alpha_W}')
-    print_and_log(f'NMF alpha_H: {alpha_H}')
-    print_and_log(f'NMF L1 Ratio: {l1_ratio}')
+    init = (Wt (K, N), H (K, M)) continues from given factors, otherwise NNDSVDa.
+    Returns Wt (K, N), H (K, M), err_list.
+    """
 
-    sy, sx, dy, dx = data_4D.shape
-    X_np = np.ascontiguousarray(data_4D.reshape(-1, np.prod((dy, dx))), dtype=np.float32)
-
-    # Nonnegative input is required by NMF.
-    X_np = np.maximum(X_np, 0)
-    X_cpu = torch.from_numpy(X_np)
-
-    N, M = X_cpu.shape
-    block_size = (N + n_block - 1) // n_block
-    W, H = nndsvd_init(X_cpu, n_components, device=device)
+    dev = blocks.device
+    N, M = blocks.N, blocks.M
+    K = n_components
     eps = 1e-12
+
+    col_sum, norm_X_sq = stats
+    avg = col_sum.sum().item() / (N * M)
+    init_eps = max(avg * 1e-3, 1e-6)
+
+    if init is None:
+        W0, H = nndsvd_init(blocks, K, seed=random_state, stats=stats)
+        Wt = W0.T.contiguous()
+    else:
+        Wt = init[0].to(dev, torch.float32).contiguous().clone()
+        H = init[1].to(dev, torch.float32).contiguous().clone()
 
     reg_W_l1 = alpha_W * M * l1_ratio
     reg_W_l2 = alpha_W * M * (1 - l1_ratio)
     reg_H_l1 = alpha_H * N * l1_ratio
     reg_H_l2 = alpha_H * N * (1 - l1_ratio)
 
-    # Precompute ||X||_F^2 only once.
-    norm_X_sq = torch.zeros((), dtype=torch.float32)
-    for start in range(0, N, block_size):
-        Xb = X_cpu[start:start + block_size]
-        norm_X_sq += Xb.square().sum()
-    norm_X_sq = norm_X_sq.item()
+    Q = torch.empty((K, M), dtype=torch.float32, device=dev)
+    Pt = torch.empty((K, N), dtype=torch.float32, device=dev)
 
     err_list = []
     previous_err = None
-
+    last_line = None
+    n_reinit = 0
+    n_fallback = 0
 
     start_time = time.perf_counter()
     print_and_log('')
-    print_and_log(f'####################### NMF Process ######################')
-    print("\rNMF progressing: {:^3.0f}%[{}->{}] ?iter/s ({:0>2}:{:0>2}:{:0>2}<??:??:??)".format(0, "*" * 0, "." * 10, 0, 0, 0), end="")
+    print_and_log(f'####################### {label} Process ######################')
+    print("\r{} progressing: {:^3.0f}%[{}->{}] ?iter/s ({:0>2}:{:0>2}:{:0>2}<??:??:??)".format(label, 0, "*" * 0, "." * 10, 0, 0, 0), end="")
 
     for i in range(iter_max):
 
@@ -137,50 +400,82 @@ def fast_hals_NMF(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, alph
         # Update H
         # Q = W.T @ X, A = W.T @ W
         # ----------------------------------------------------
-        Q = torch.zeros((n_components, M), dtype=torch.float32, device=device)
+        Q.zero_()
 
-        for start in range(0, N, block_size):
-            end = min(start + block_size, N)
-            Xb = X_cpu[start:end].to(device)
-            Q += W[start:end].T @ Xb
+        for start, end, Xb in blocks:
+            Q += Wt[:, start:end] @ Xb
 
-        A = W.T @ W
+        A = Wt @ Wt.T
 
-        for k in range(n_components):
-            denom = (A[k, k] + reg_H_l2).clamp_min(eps)
-            H[k] = torch.clamp(H[k] + (Q[k] - A[k] @ H - reg_H_l1) / denom, min=0)
+        for _ in range(n_inner):
+            for k in range(K):
+                denom = (A[k, k] + reg_H_l2).clamp_min(eps)
+                H[k] = torch.clamp(H[k] + (Q[k] - A[k] @ H - reg_H_l1 - reg_H_l2 * H[k]) / denom, min=0)
 
         # ----------------------------------------------------
         # Update W
-        # P = X @ H.T, B = H @ H.T
+        # Pt = H @ X.T, B = H @ H.T
         # ----------------------------------------------------
-        P = torch.empty((N, n_components), dtype=torch.float32, device=device)
-
-        for start in range(0, N, block_size):
-            end = min(start + block_size, N)
-            Xb = X_cpu[start:end].to(device)
-            P[start:end] = Xb @ H.T
+        for start, end, Xb in blocks:
+            Pt[:, start:end] = H @ Xb.T
 
         B = H @ H.T
 
-        for k in range(n_components):
-            denom = (B[k, k] + reg_W_l2).clamp_min(eps)
-            W[:, k] = torch.clamp(W[:, k] + (P[:, k] - W @ B[:, k] - reg_W_l1) / denom, min=0)
+        for _ in range(n_inner):
+            for k in range(K):
+                denom = (B[k, k] + reg_W_l2).clamp_min(eps)
+                Wt[k] = torch.clamp(Wt[k] + (Pt[k] - B[k] @ Wt - reg_W_l1 - reg_W_l2 * Wt[k]) / denom, min=0)
 
         # ----------------------------------------------------
-        # Fast error calculation: reuse P = X @ H.T
-        # ||X - WH||^2 = ||X||^2 - 2 <P,W> + <W.T W,H H.T>
+        # Fast error calculation: reuse Pt = H @ X.T (it only depends on H)
+        # ||X - WH||^2 = ||X||^2 - 2 <Pt,Wt> + <Wt Wt^T, H H^T>
+        # The three terms nearly cancel, so they are evaluated in float64.
         # ----------------------------------------------------
-        A_final = W.T @ W
+        A_final = Wt @ Wt.T
 
-        cross_term = torch.sum(P * W)
-        model_norm_sq = torch.sum(A_final * B)
-        residual_sq = max(norm_X_sq - 2.0 * cross_term.item() + model_norm_sq.item(), 0.0)
+        cross_term = (_f64(Pt) * _f64(Wt)).sum()
+        model_norm_sq = (_f64(A_final) * _f64(B)).sum()
+        cross_term, model_norm_sq = torch.stack([cross_term, model_norm_sq]).cpu().tolist()
 
-        err = np.sqrt(residual_sq / max(norm_X_sq, eps))
+        residual_sq = norm_X_sq - 2.0 * cross_term + model_norm_sq
+
+        # A residual that is non-finite or ~0 means the three terms cancelled completely: do not trust it.
+        if (not math.isfinite(residual_sq)) or residual_sq <= 1e-9 * norm_X_sq:
+            exact_sq = _exact_residual_sq(blocks, Wt, H)
+
+            if n_fallback < 3:
+                print_and_log(f'{label}: fast error estimate unreliable at iteration {i}: formula = {residual_sq:.6e}, explicit = {exact_sq:.6e}, ||X||^2 = {norm_X_sq:.6e}, <P,W> = {cross_term:.6e}, ||WH||^2 = {model_norm_sq:.6e}')
+
+            n_fallback += 1
+            residual_sq = exact_sq
+
+        residual_sq = max(residual_sq, 0.0)
+
+        err = math.sqrt(residual_sq / max(norm_X_sq, eps))
         err_list.append(err)
 
+        # ----------------------------------------------------
+        # A collapsed (all zero) component can never recover by itself: restart it.
+        # ----------------------------------------------------
+        dead = (H.sum(dim=1) <= 0) | (Wt.sum(dim=1) <= 0)
+
+        if dead.any():
+            idx = dead.nonzero().flatten()
+            H[idx] = init_eps * (1 + torch.rand((idx.numel(), M), device=dev))
+            Wt[idx] = init_eps * (1 + torch.rand((idx.numel(), N), device=dev))
+            n_reinit += int(idx.numel())
+
         # Convergence check
+        if not math.isfinite(err):
+            print('')
+            print_and_log(f'{label}: error is not finite at iteration {i}, stopping.')
+            break
+
+        if err <= 0.0:
+            print('')
+            print_and_log(f'{label}: exact fit (error = 0), stopping.')
+            break
+
         if previous_err is not None:
             relative_change = abs(previous_err - err) / max(previous_err, eps)
             if relative_change < tol:
@@ -190,43 +485,92 @@ def fast_hals_NMF(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, alph
 
         previous_err = err
 
-        time_is = time.perf_counter() - time_i0
-        speed = 1 / time_is
-        process = (i + 1) / iter_max * 100
-        aa = "*" * int(process / 10)
-        bb = "." * (10 - int(process / 10))
-        dur = int(time.perf_counter() - start_time)
-        time_remain = int((iter_max - i - 1) * time_is)
-        dur_h = dur // 3600
-        dur_m = (dur - dur_h * 3600) // 60
-        dur_s = dur - dur_h * 3600 - dur_m * 60
-        time_remain_h = time_remain // 3600
-        time_remain_m = (time_remain - time_remain_h * 3600) // 60
-        time_remain_s = time_remain - time_remain_h * 3600 - time_remain_m * 60
+        last_line = _progress_str(label, i, iter_max, time_i0, start_time)
+        print("\r" + last_line, end="")
 
-        print("\rNMF progressing: {:^3.0f}%[{}->{}] {:.2f}iter/s ({:0>2}:{:0>2}:{:0>2}<{:0>2}:{:0>2}:{:0>2})".format(process, aa, bb, speed, dur_h, dur_m, dur_s, time_remain_h, time_remain_m, time_remain_s), end="")
     print('')
-    log_to_file("NMF progressing: {:^3.0f}%[{}->{}] {:.2f}iter/s ({:0>2}:{:0>2}:{:0>2}<{:0>2}:{:0>2}:{:0>2})".format(process, aa, bb, speed, dur_h, dur_m, dur_s, time_remain_h, time_remain_m, time_remain_s))
-    
-    gpu_time = time.perf_counter() - start_time
-    print_and_log(f'NMF process finished in {gpu_time} s')
 
-    W = np.moveaxis(np.array(W.cpu()).reshape(sy, sx, n_components), -1, 0)
-    H = np.array(H.cpu()).reshape(n_components, dy, dx)
+    if last_line is not None:
+        log_to_file(last_line)
+
+    if n_reinit > 0:
+        print_and_log(f'{label}: {n_reinit} collapsed component(s) were re-initialized.')
+
+    gpu_time = time.perf_counter() - start_time
+    print_and_log(f'{label} process finished in {gpu_time} s')
+
+    return Wt, H, err_list
+
+
+
+
+def _log_nmf_params(dev, n_components, iter_max, tol, n_block, alpha_W, alpha_H, l1_ratio, n_inner):
+
+    print_and_log('')
+    print_and_log('##################### NMF Parameters ######################')
+    print_and_log(f"Device Using: {dev}")
+    print_and_log(f'NMF Components Number: {n_components}')
+    print_and_log(f'Number of Iterations: {iter_max}')
+    print_and_log(f'NMF Convergence Tolerance: {tol}')
+    print_and_log(f'NMF Block Number: {n_block}')
+    print_and_log(f'NMF alpha_W: {alpha_W}')
+    print_and_log(f'NMF alpha_H: {alpha_H}')
+    print_and_log(f'NMF L1 Ratio: {l1_ratio}')
+    print_and_log(f'NMF Inner Sweeps per Pass: {n_inner}')
+
+
+
+
+@torch.no_grad()
+def fast_hals_NMF(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, alpha_W=0.0, alpha_H=0.0, l1_ratio=0.0, device=None, n_inner=3, random_state=0):
+
+    dev = _resolve_device(device)
+
+    _log_nmf_params(dev, n_components, iter_max, tol, n_block, alpha_W, alpha_H, l1_ratio, n_inner)
+
+    sy, sx, dy, dx = data_4D.shape
+
+    # Nonnegative input is required by NMF.
+    X_np = _prepare_matrix(data_4D, nonneg=True)
+
+    N, M = X_np.shape
+    K = n_components
+
+    if not isinstance(K, int) or not 1 <= K <= min(N, M):
+        raise ValueError(f'n_components must be between 1 and {min(N, M)}.')
+
+    if not isinstance(n_inner, int) or n_inner < 1:
+        raise ValueError('n_inner must be a positive integer.')
+
+    blocks = BlockedMatrix(X_np, n_block, dev)
+    stats = _block_stats(blocks)
+
+    Wt, H, err_list = _hals_nmf_torch(blocks, K, iter_max, tol, n_inner, alpha_W, alpha_H, l1_ratio, stats, random_state=random_state)
+
+    W = Wt.cpu().numpy().reshape(K, sy, sx)
+    H = H.cpu().numpy().reshape(K, dy, dx)
+
+    _check_output(W, H, 'NMF')
 
     return W, H, err_list
 
 
 
-# Perform PCA using randomized SVD.
-def PCA(data_4D, n_components, n_block=1, device='None', n_oversamples=10, n_power_iter=2, random_state=0):
 
-    if device is None:
-        device = 'cpu'
+
+# ==========================================================================
+# PCA
+# ==========================================================================
+
+# Perform PCA using randomized SVD.
+@torch.no_grad()
+def PCA(data_4D, n_components, n_block=1, device=None, n_oversamples=10, n_power_iter=2, random_state=0):
+
+    dev = _resolve_device(device)
 
     print_and_log('')
     print_and_log('##################### PCA Parameters ######################')
-    print_and_log(f'Device Using: {device}')
+    print_and_log(f'Device Using: {dev}')
     print_and_log(f'PCA Components Number: {n_components}')
     print_and_log(f'PCA Block Number: {n_block}')
     print_and_log(f'PCA Oversamples: {n_oversamples}')
@@ -238,13 +582,10 @@ def PCA(data_4D, n_components, n_block=1, device='None', n_oversamples=10, n_pow
     # 0. Prepare data
     # --------------------------------------------------
     sy, sx, dy, dx = data_4D.shape
-    X_np = np.ascontiguousarray(data_4D.reshape(-1, dy * dx), dtype=np.float32)
+    X_np = _prepare_matrix(data_4D)
 
     N, M = X_np.shape
     K = n_components
-
-    if not isinstance(n_block, int) or n_block < 1:
-        raise ValueError('n_block must be a positive integer.')
 
     if not isinstance(K, int) or not 1 <= K <= min(N - 1, M):
         raise ValueError(f'n_components must be between 1 and {min(N - 1, M)}.')
@@ -255,128 +596,53 @@ def PCA(data_4D, n_components, n_block=1, device='None', n_oversamples=10, n_pow
     if not isinstance(n_power_iter, int) or n_power_iter < 0:
         raise ValueError('n_power_iter must be a non-negative integer.')
 
-    dev = torch.device(device)
-    block_size = min((N + n_block - 1) // n_block, 256)
-    L = min(K + n_oversamples, N - 1, M)
-
-    torch.manual_seed(random_state)
-    if dev.type == 'cuda':
-        torch.cuda.manual_seed_all(random_state)
+    blocks = BlockedMatrix(X_np, n_block, dev)
 
     # --------------------------------------------------
-    # 1. Compute mean in blocks
+    # 1. Randomized SVD of the centered data
+    # Xc ~ U S V^T,  H = V^T,  W = Xc @ V = U S
     # --------------------------------------------------
-    mean = torch.zeros(M, dtype=torch.float32, device=dev)
+    U, S, V, mean, total_sq = _randomized_pca(blocks, K, n_oversamples, n_power_iter, dev, random_state, center=True)
 
-    for start in range(0, N, block_size):
-        end = min(start + block_size, N)
-        Xb = torch.as_tensor(X_np[start:end], dtype=torch.float32, device=dev)
-        mean += Xb.sum(dim=0)
-
-    mean /= N
-    mean32 = mean.to(torch.float32)
-
-    # --------------------------------------------------
-    # 2. Randomized range finder
-    # Y = Xc @ Omega
-    # --------------------------------------------------
-    Omega = torch.randn(M, L, dtype=torch.float32, device=dev)
-    Y = torch.empty((N, L), dtype=torch.float32, device=dev)
-    total_variance = 0.0
-
-    for start in range(0, N, block_size):
-        end = min(start + block_size, N)
-        Xb = torch.as_tensor(X_np[start:end], dtype=torch.float32, device=dev)
-        Xc = Xb - mean32
-        Y[start:end] = Xc @ Omega
-        total_variance += Xc.square().sum().item()
-
-    Q, _ = torch.linalg.qr(Y, mode='reduced')
-
-    # --------------------------------------------------
-    # 3. Power iterations
-    # Improve approximation of the leading PCA subspace
-    # --------------------------------------------------
-    for _ in range(n_power_iter):
-        Z = torch.zeros((M, L), dtype=torch.float32, device=dev)
-
-        for start in range(0, N, block_size):
-            end = min(start + block_size, N)
-            Xb = torch.as_tensor(X_np[start:end], dtype=torch.float32, device=dev)
-            Xc = Xb - mean32
-            Z += Xc.T @ Q[start:end]
-
-        Z, _ = torch.linalg.qr(Z, mode='reduced')
-
-        Y = torch.empty((N, L), dtype=torch.float32, device=dev)
-
-        for start in range(0, N, block_size):
-            end = min(start + block_size, N)
-            Xb = torch.as_tensor(X_np[start:end], dtype=torch.float32, device=dev)
-            Xc = Xb - mean32
-            Y[start:end] = Xc @ Z
-
-        Q, _ = torch.linalg.qr(Y, mode='reduced')
-
-    # --------------------------------------------------
-    # 4. SVD of compressed matrix
-    # B = Q.T @ Xc
-    # --------------------------------------------------
-    B = torch.zeros((L, M), dtype=torch.float32, device=dev)
-
-    for start in range(0, N, block_size):
-        end = min(start + block_size, N)
-        Xb = torch.as_tensor(X_np[start:end], dtype=torch.float32, device=dev)
-        Xc = Xb - mean32
-        B += Q[start:end].T @ Xc
-
-    _, S, Vh = torch.linalg.svd(B, full_matrices=False)
-
-    S = S[:K]
-    H = Vh[:K].contiguous()
+    U, V = _fix_sign(U, V)
 
     # Eigenvalues of covariance matrix C = Xc.T @ Xc / N
     eigvals = S.square() / N
     Lambda = torch.diag(eigvals)
 
-    explained_ratio = S.square().sum().item() / max(total_variance, 1e-12)
+    explained_ratio = S.square().sum().item() / max(total_sq, 1e-12)
 
     # --------------------------------------------------
-    # 5. Compute spatial scores in blocks
-    # W = Xc @ H.T
+    # 2. Reshape and return
     # --------------------------------------------------
-    W = torch.empty((N, K), dtype=torch.float32, device=dev)
-
-    for start in range(0, N, block_size):
-        end = min(start + block_size, N)
-        Xb = torch.as_tensor(X_np[start:end], dtype=torch.float32, device=dev)
-        Xc = Xb - mean32
-        W[start:end] = Xc @ H.T
-
-    # --------------------------------------------------
-    # 6. Reshape and return
-    # --------------------------------------------------
-    W = W.T.reshape(K, sy, sx).cpu().numpy()
-    H = H.reshape(K, dy, dx).cpu().numpy()
+    W = (U * S[None, :]).T.reshape(K, sy, sx).cpu().numpy()
+    H = V.T.reshape(K, dy, dx).cpu().numpy()
     Lambda = Lambda.cpu().numpy()
 
     print_and_log(f'Explained Variance Ratio: {explained_ratio:.6f}')
     print_and_log(f'PCA process finished in {time.perf_counter() - start_time:.2f} s')
+
+    _check_output(W, H, 'PCA')
 
     return W, H, Lambda
 
 
 
 
-# Perform FastICA with randomized PCA whitening.
-def fast_ICA(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, device='None', n_oversamples=10, n_power_iter=2, random_state=0):
 
-    if device is None:
-        device = 'cpu'
+# ==========================================================================
+# ICA
+# ==========================================================================
+
+# Perform FastICA with randomized PCA whitening.
+@torch.no_grad()
+def fast_ICA(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, device=None, n_oversamples=10, n_power_iter=2, random_state=0):
+
+    dev = _resolve_device(device)
 
     print_and_log('')
     print_and_log('###################### ICA Parameters ######################')
-    print_and_log(f'Device Using: {device}')
+    print_and_log(f'Device Using: {dev}')
     print_and_log(f'ICA Components Number: {n_components}')
     print_and_log(f'Number of Iterations: {iter_max}')
     print_and_log(f'ICA Convergence Tolerance: {tol}')
@@ -390,16 +656,13 @@ def fast_ICA(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, device='N
     # 0. Prepare data
     # --------------------------------------------------
     sy, sx, dy, dx = data_4D.shape
-    X_np = np.ascontiguousarray(data_4D.reshape(-1, dy * dx), dtype=np.float32)
+    X_np = _prepare_matrix(data_4D)
 
     N, M = X_np.shape
     K = n_components
 
     if not isinstance(K, int) or not 1 <= K <= min(N - 1, M):
         raise ValueError(f'n_components must be between 1 and {min(N - 1, M)}.')
-
-    if not isinstance(n_block, int) or n_block < 1:
-        raise ValueError('n_block must be a positive integer.')
 
     if not isinstance(n_oversamples, int) or n_oversamples < 0:
         raise ValueError('n_oversamples must be a non-negative integer.')
@@ -410,108 +673,45 @@ def fast_ICA(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, device='N
     if iter_max < 1 or tol <= 0:
         raise ValueError('iter_max must be positive and tol must be positive.')
 
-    dev = torch.device(device)
-    block_size = min((N + n_block - 1) // n_block, 256)
-    L = min(K + n_oversamples, N - 1, M)
-
-    torch.manual_seed(random_state)
-    if dev.type == 'cuda':
-        torch.cuda.manual_seed_all(random_state)
+    blocks = BlockedMatrix(X_np, n_block, dev)
 
     # --------------------------------------------------
-    # 1. Mean
+    # 1. Randomized PCA whitening
+    # Xc ~ U S V^T,  whitened data Z = U sqrt(N),  dewhitening = V S / sqrt(N)
     # --------------------------------------------------
-    mean = torch.zeros(M, dtype=torch.float32, device=dev)
+    U, S, V, mean, total_sq = _randomized_pca(blocks, K, n_oversamples, n_power_iter, dev, random_state, center=True)
 
-    for start in range(0, N, block_size):
-        end = min(start + block_size, N)
-        Xb = torch.as_tensor(X_np[start:end], dtype=torch.float32, device=dev)
-        mean += Xb.sum(dim=0)
+    eigvals = S.square() / N
 
-    mean /= N
-    mean32 = mean.to(torch.float32)
+    if eigvals.min().item() < 1e-6 * eigvals.max().item():
+        print_and_log('Warning: some retained PCA components have tiny variance, whitening will amplify noise. Consider fewer ICA components.')
 
-    # --------------------------------------------------
-    # 2. Randomized truncated SVD for PCA whitening
-    # --------------------------------------------------
-    # Compute only the leading L principal components.
-    # Avoid constructing the full M x M covariance matrix.
+    eigvals = eigvals.clamp_min(1e-12)
+    dewhitening = V * torch.sqrt(eigvals)[None, :]
 
-    Omega = torch.randn(M, L, dtype=torch.float32, device=dev)
-    Y = torch.empty((N, L), dtype=torch.float32, device=dev)
+    # The fixed-point iteration is tiny (N x K), use float64 whenever the device has it.
+    work_dtype = torch.float64 if dev.type in ('cpu', 'cuda') else torch.float32
+    Z = (U * math.sqrt(N)).to(work_dtype)
 
-    norm_X_sq = 0.0
-
-    for start in range(0, N, block_size):
-        end = min(start + block_size, N)
-        Xb = torch.as_tensor(X_np[start:end], dtype=torch.float32, device=dev)
-        Xc = Xb - mean32
-        Y[start:end] = Xc @ Omega
-        norm_X_sq += Xc.square().sum().item()
-
-    Q, _ = torch.linalg.qr(Y, mode='reduced')
-
-    # Power iterations improve the approximation of the leading subspace.
-    for _ in range(n_power_iter):
-        Z_range = torch.zeros((M, L), dtype=torch.float32, device=dev)
-
-        for start in range(0, N, block_size):
-            end = min(start + block_size, N)
-            Xb = torch.as_tensor(X_np[start:end], dtype=torch.float32, device=dev)
-            Xc = Xb - mean32
-            Z_range += Xc.T @ Q[start:end]
-
-        Z_range, _ = torch.linalg.qr(Z_range, mode='reduced')
-
-        Y = torch.empty((N, L), dtype=torch.float32, device=dev)
-
-        for start in range(0, N, block_size):
-            end = min(start + block_size, N)
-            Xb = torch.as_tensor(X_np[start:end], dtype=torch.float32, device=dev)
-            Xc = Xb - mean32
-            Y[start:end] = Xc @ Z_range
-
-        Q, _ = torch.linalg.qr(Y, mode='reduced')
-
-    # Compressed matrix B = Q.T @ Xc
-    B = torch.zeros((L, M), dtype=torch.float32, device=dev)
-
-    for start in range(0, N, block_size):
-        end = min(start + block_size, N)
-        Xb = torch.as_tensor(X_np[start:end], dtype=torch.float32, device=dev)
-        Xc = Xb - mean32
-        B += Q[start:end].T @ Xc
-
-    Ub, S, Vh = torch.linalg.svd(B, full_matrices=False)
-
-    S = S[:K].to(torch.float32)
-    E = Vh[:K].T.contiguous().to(torch.float32)
-
-    eigvals = (S.square() / N).clamp_min(1e-12)
-
-    whitening = E / torch.sqrt(eigvals)[None, :]
-    dewhitening = E * torch.sqrt(eigvals)[None, :]
-
-    # Whitened data: Z = U * sqrt(N).
-    # This avoids an additional pass computing Xc @ whitening.
-    Z = (Q @ Ub[:, :K]) * np.sqrt(N)
-    Z = Z.to(torch.float32)
-
-    explained_ratio = S.square().sum().item() / max(norm_X_sq, 1e-12)
+    explained_ratio = S.square().sum().item() / max(total_sq, 1e-12)
 
     print_and_log(f'PCA Explained Variance Ratio: {explained_ratio:.6f}')
     print_and_log(f'PCA Whitening Finished in {time.perf_counter() - start_time:.2f} s')
     print_and_log('')
 
     # --------------------------------------------------
-    # 3. Symmetric FastICA fixed-point iteration
+    # 2. Symmetric FastICA fixed-point iteration
     # --------------------------------------------------
-    Q_ica, _ = torch.linalg.qr(torch.randn(K, K, dtype=torch.float32, device=dev), mode='reduced')
+    g = torch.Generator().manual_seed(random_state)
+    Q_ica, _ = torch.linalg.qr(torch.randn(K, K, generator=g, dtype=work_dtype), mode='reduced')
+    Q_ica = Q_ica.to(dev)
 
     converged = False
     iteration_count = 0
+    lim = float('inf')
 
     for iteration in range(iter_max):
+
         Y_ica = Z @ Q_ica.T
 
         # g(y) = tanh(y), g'(y) = 1 - tanh(y)^2
@@ -521,8 +721,9 @@ def fast_ICA(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, device='N
         Q_new = (G.T @ Z) / N - Gp.mean(dim=0)[:, None] * Q_ica
 
         # Symmetric decorrelation: Q_new <- (Q_new Q_new.T)^(-1/2) Q_new
-        U_ica, _, Vh_ica = torch.linalg.svd(Q_new, full_matrices=False)
-        Q_new = U_ica @ Vh_ica
+        # K x K SVD is faster on the CPU.
+        U_ica, _, Vh_ica = torch.linalg.svd(Q_new.cpu(), full_matrices=False)
+        Q_new = (U_ica @ Vh_ica).to(dev)
 
         lim = torch.max(torch.abs(torch.abs(torch.diagonal(Q_new @ Q_ica.T)) - 1)).item()
 
@@ -541,13 +742,22 @@ def fast_ICA(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, device='N
         print_and_log(f'lim = {lim:.6e} > tol = {tol}.')
 
     # --------------------------------------------------
-    # 4. Spatial sources and detector-space patterns
+    # 3. Spatial sources and detector-space patterns
     # --------------------------------------------------
-    W = Z @ Q_ica.T
-    H = Q_ica @ dewhitening.T
+    Y_ica = Z @ Q_ica.T
+    H = Q_ica @ dewhitening.to(work_dtype).T
 
-    W32 = W.to(torch.float32)
-    H32 = H.to(torch.float32)
+    # Sign: positive skewness. Order: by the strength of the detector pattern.
+    skew = (Y_ica ** 3).mean(dim=0)
+    sign = torch.where(skew >= 0, torch.ones_like(skew), -torch.ones_like(skew))
+
+    Y_ica = Y_ica * sign[None, :]
+    H = H * sign[:, None]
+
+    order = torch.argsort(torch.linalg.vector_norm(H, dim=1), descending=True)
+
+    W32 = Y_ica[:, order].to(torch.float32)
+    H32 = H[order].to(torch.float32)
 
     print_and_log('')
     print_and_log(f'ICA Total Process Finished in {time.perf_counter() - start_time:.2f} s')
@@ -555,406 +765,240 @@ def fast_ICA(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, device='N
     W = W32.T.reshape(K, sy, sx).cpu().numpy()
     H = H32.reshape(K, dy, dx).cpu().numpy()
 
+    _check_output(W, H, 'ICA')
+
     return W, H
 
 
 
 
 
-# Perform PCA using covariance eigendecomposition.
-# def PCA(data_4D, n_components, n_block=1, device='None'):
+# ==========================================================================
+# Nonnegative ICA
+# ==========================================================================
 
-#     if device is None:
-#         device = 'cpu'
+@torch.no_grad()
+def nonnegative_ica_rotation(W0, H0, n_components=None, beta=1.0, neg_tol=0.0, iter_max=1000, tol=1e-8, step_init=1.0, device='cpu'):
 
-#     print_and_log('')
-#     print_and_log('##################### PCA Parameters ######################')
-#     print_and_log(f'Device Using: {device}')
-#     print_and_log(f'PCA Components Number: {n_components}')
-#     print_and_log(f'PCA Block Number: {n_block}')
+    """
+    Nonnegative ICA by rotating a nonnegative factorization X ~ W0 @ H0
+    (W0: N x K >= 0, H0: K x M >= 0), Plumbley-style.
 
-#     sy, sx, dy, dx = data_4D.shape
+    1. Whiten W0 with its centered covariance but keep the mean:
+           W0 ~ z @ L,   z = W0 @ Linv,   Cov(z) = I
+    2. Nonnegative, independent (hence uncorrelated) unit-variance sources satisfy S = z @ Q
+       with Q orthogonal. The mean offset is automatically contained in z.
+    3. The same Q rotates the detector side: H = Q^T @ (L @ H0), because S @ H = z @ L @ H0.
+    4. Q minimizes the energy of the negative parts of both factors:
+           J(Q) = ||min(zQ + tau, 0)||^2 / ||z||^2 + beta ||min(Q^T L H0 + tau, 0)||^2 / ||L H0||^2
+       (both norms are invariant under rotation), on the orthogonal group by
+       Riemannian gradient descent with an adaptive step.
 
-#     X_np = np.ascontiguousarray(data_4D.reshape(-1, dy * dx), dtype=np.float32)
+    n_components = R < K additionally projects on the R leading directions of W0.
+    Only R x R matrices are optimized, the cost is negligible compared with the NMF.
 
-#     N, M = X_np.shape
-#     K = n_components
+    Returns S (N x R), H (R x M) as float32 CPU tensors, and an info dict.
+    """
 
-#     if not isinstance(n_block, int) or n_block < 1:
-#         raise ValueError('n_block must be a positive integer.')
+    dev = _resolve_device(device)
 
-#     dev = torch.device(device)
-#     block_size = (N + n_block - 1) // n_block
+    if dev.type == 'mps':
+        dev = torch.device('cpu')
 
-#     start_time = time.perf_counter()
+    dt = torch.float64
+    W0 = torch.as_tensor(W0).detach().cpu().to(dt).to(dev)
+    H0 = torch.as_tensor(H0).detach().cpu().to(dt).to(dev)
 
-#     # --------------------------------------------------
-#     # 1. Compute mean in blocks
-#     # --------------------------------------------------
-#     mean = torch.zeros(M, dtype=torch.float32, device=dev)
+    N, K = W0.shape
+    R = K if n_components is None else int(min(max(n_components, 1), K))
 
-#     for start in range(0, N, block_size):
-#         Xb = torch.as_tensor(X_np[start:start + block_size], dtype=torch.float32, device=dev)
-#         mean += Xb.sum(dim=0)
-#     mean /= N
+    # ---- whitening without removing the mean -----------------------------
+    Wc = W0 - W0.mean(dim=0, keepdim=True)
+    C = Wc.T @ Wc / N
+    ev, E = torch.linalg.eigh(C)
+    ev = ev.flip(0)
+    E = E.flip(1)
+    ev = ev.clamp_min(1e-12 * max(ev[0].item(), 1e-30))
 
-#     # --------------------------------------------------
-#     # 2. Compute covariance matrix
-#     # C = Xc.T @ Xc / N
-#     # --------------------------------------------------
-#     C = torch.zeros((M, M), dtype=torch.float32, device=dev)
+    E_R = E[:, :R]
+    sq = ev[:R].sqrt()
 
-#     for start in range(0, N, block_size):
-#         Xb = torch.as_tensor(X_np[start:start + block_size], dtype=torch.float32, device=dev)
-#         Xb = Xb - mean
-#         C += Xb.T @ Xb
+    Linv = E_R / sq[None, :]                # (K, R)
+    L = (E_R * sq[None, :]).T               # (R, K)
 
-#     C /= N
+    if R == K:
+        # Symmetric (ZCA) whitening keeps z closest to W0, Q = I is then the NMF solution itself.
+        Linv = Linv @ E_R.T
+        L = E_R @ L
 
-#     # --------------------------------------------------
-#     # 3. Eigenvalue decomposition
-#     # --------------------------------------------------
-#     eigvals, eigvecs = torch.linalg.eigh(C)
+    z = W0 @ Linv                           # (N, R)
+    Hh = L @ H0                             # (R, M)
 
-#     # Sort eigenvalues in descending order
-#     idx = torch.argsort(eigvals, descending=True)[:K]
+    nz = z.square().sum().clamp_min(1e-30)
+    nh = Hh.square().sum().clamp_min(1e-30)
+    tau_z = neg_tol * (nz / z.numel()).sqrt()
+    tau_h = neg_tol * (nh / Hh.numel()).sqrt()
 
-#     eigvals = eigvals[idx].clamp_min(0)
-#     H = eigvecs[:, idx].T.contiguous()  # (K, M)
+    def cost(Q):
+        Y = z @ Q
+        Hq = Q.T @ Hh
+        return (Y + tau_z).clamp(max=0).square().sum() / nz + beta * (Hq + tau_h).clamp(max=0).square().sum() / nh
 
-#     # Diagonal matrix of selected eigenvalues
-#     Lambda = torch.diag(eigvals)  # (K, K)
+    def grad(Q):
+        Y = z @ Q
+        Hq = Q.T @ Hh
+        return 2 * z.T @ (Y + tau_z).clamp(max=0) / nz + beta * 2 * Hh @ (Hq + tau_h).clamp(max=0).T / nh
 
-#     # Explained variance ratio
-#     explained_ratio = (eigvals.sum() / torch.trace(C).clamp_min(1e-12)).item()
+    Q = torch.eye(R, dtype=dt, device=dev)
+    f = cost(Q)
+    step = step_init
+    n_iter = 0
 
-#     # --------------------------------------------------
-#     # 4. Compute spatial scores in blocks
-#     # W = Xc @ H.T
-#     # --------------------------------------------------
-#     H32 = H.to(torch.float32)
-#     mean32 = mean.to(torch.float32)
+    for it in range(iter_max):
 
-#     W = torch.empty((N, K), dtype=torch.float32, device=dev)
+        G = grad(Q)
+        Om = G @ Q.T - Q @ G.T              # skew-symmetric Riemannian gradient
 
-#     for start in range(0, N, block_size):
-#         end = min(start + block_size, N)
-#         Xb = torch.as_tensor(X_np[start:end], dtype=torch.float32, device=dev)
-#         Xc = Xb - mean32
-#         W[start:end] = Xc @ H32.T
+        improved = False
 
-#     # --------------------------------------------------
-#     # 5. Reshape and return
-#     # --------------------------------------------------
-#     W = W.T.reshape(K, sy, sx).cpu().numpy()
-#     H = H32.reshape(K, dy, dx).cpu().numpy()
-#     Lambda = Lambda.cpu().numpy()
+        while step > 1e-12:
+            Q_new = torch.linalg.matrix_exp(-step * Om) @ Q
+            f_new = cost(Q_new)
 
-#     print_and_log(f'Explained Variance Ratio: {explained_ratio:.6f}')
-#     print_and_log(f'PCA process finished in {time.perf_counter() - start_time:.2f} s')
+            if f_new < f:
+                improved = True
+                break
 
-#     return W, H, Lambda
+            step *= 0.5
 
+        if not improved:
+            break
 
-# Perform FastICA with covariance-based PCA whitening.
-# def fast_ICA(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, device='None'):
+        rel = ((f - f_new) / f.clamp_min(1e-30)).item()
 
-#     if device is None:
-#         device = 'cpu'
+        Q, f = Q_new, f_new
+        step *= 1.5
+        n_iter = it + 1
 
-#     print_and_log('')
-#     print_and_log('##################### ICA Parameters ######################')
-#     print_and_log(f'Device Using: {device}')
-#     print_and_log(f'ICA Components Number: {n_components}')
-#     print_and_log(f'Number of Iterations: {iter_max}')
-#     print_and_log(f'ICA Convergence Tolerance: {tol}')
-#     print_and_log(f'ICA Block Number: {n_block}')
+        if rel < tol:
+            break
 
-#     sy, sx, dy, dx = data_4D.shape
-#     X_np = np.ascontiguousarray(data_4D.reshape(-1, dy * dx), dtype=np.float32)
+    S = (z @ Q).to(torch.float32).cpu()
+    H = (Q.T @ Hh).to(torch.float32).cpu()
 
-#     N, M = X_np.shape
-#     K = n_components
-
-#     dev = torch.device(device)
-#     block_size = (N + n_block - 1) // n_block
-
-#     # --------------------------------------------------
-#     # 1. Mean and covariance
-#     # --------------------------------------------------
-#     mean = torch.zeros(M, dtype=torch.float32, device=dev)
+    info = {'cost': f.item(), 'iters': n_iter, 'min_S': S.min().item(), 'min_H': H.min().item(), 'neg_frac_S': (S < 0).float().mean().item(), 'neg_frac_H': (H < 0).float().mean().item()}
 
-#     for start in range(0, N, block_size):
-#         Xb = torch.as_tensor(X_np[start:start + block_size], dtype=torch.float32, device=dev)
-#         mean += Xb.sum(dim=0)
-
-#     mean /= N
+    print_and_log(f'Nonnegative ICA rotation: iterations = {n_iter}, cost = {info["cost"]:.6e}')
+    print_and_log(f'Negative entries: S {info["neg_frac_S"]:.4%} (min {info["min_S"]:.3e}), H {info["neg_frac_H"]:.4%} (min {info["min_H"]:.3e})')
 
-#     C = torch.zeros((M, M), dtype=torch.float32, device=dev)
+    return S, H, info
 
-#     for start in range(0, N, block_size):
-#         Xb = torch.as_tensor(X_np[start:start + block_size], dtype=torch.float32, device=dev)
-#         Xb -= mean
-#         C += Xb.T @ Xb
 
-#     C /= N
-    
-#     start_time = time.perf_counter()
 
-#     # --------------------------------------------------
-#     # 2. PCA whitening
-#     # --------------------------------------------------
-#     eigvals, eigvecs = torch.linalg.eigh(C)
-#     idx = torch.argsort(eigvals, descending=True)[:K]
 
-#     eigvals = eigvals[idx].clamp_min(1e-12)
-#     E = eigvecs[:, idx]
+@torch.no_grad()
+def fast_hals_NMF_independent(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, alpha_W=0.0, alpha_H=0.0, l1_ratio=0.0, device=None, independent_target='none', independent_components=None, independent_iter_max=1000, independent_lr=1.0, independent_beta=1.0, independent_neg_tol=0.0, independent_polish_iter=20, independent_tol=1e-8, n_inner=3, random_state=0):
 
-#     # Z has unit covariance in retained PCA subspace
-#     whitening = E / torch.sqrt(eigvals)[None, :]
-#     dewhitening = E * torch.sqrt(eigvals)[None, :]
-    
-#     print_and_log(f'ICA process finished in {time.perf_counter() - start_time:.2f} s')
+    """
+    HALS NMF followed by a nonnegative-ICA rotation.
+    independent_target: 'none' (plain NMF), 'W' (spatial maps are the independent sources),
+                        'H' (detector patterns are the independent sources).
+    independent_polish_iter: HALS iterations after the rotation to clean up residual negative values (0 = only clamp).
+    """
 
-#     # --------------------------------------------------
-#     # 3. Whitened data, stored in sample space
-#     # --------------------------------------------------
-#     Z = torch.empty((N, K), dtype=torch.float32, device=dev)
+    if independent_target == 'both':
+        raise ValueError("independent_target 'both' is no longer supported: one rotation can make only one side uncorrelated. Use 'W' or 'H'.")
 
-#     for start in range(0, N, block_size):
-#         end = min(start + block_size, N)
-#         Xb = torch.as_tensor(X_np[start:end], dtype=torch.float32, device=dev)
-#         Z[start:end] = (Xb - mean) @ whitening
+    if independent_target not in ('none', 'W', 'H'):
+        raise ValueError("independent_target must be 'none', 'W', or 'H'.")
 
-#     # --------------------------------------------------
-#     # 4. Symmetric FastICA fixed-point iteration
-#     # --------------------------------------------------
-#     torch.manual_seed(0)
-#     Q, _ = torch.linalg.qr(torch.randn(K, K, dtype=torch.float32, device=dev))
+    dev = _resolve_device(device)
 
-#     for iteration in range(iter_max):
-#         Y = Z @ Q.T
+    _log_nmf_params(dev, n_components, iter_max, tol, n_block, alpha_W, alpha_H, l1_ratio, n_inner)
 
-#         # g(y) = tanh(y), g'(y) = 1 - tanh(y)^2
-#         G = torch.tanh(Y)
-#         Gp = 1.0 - G.square()
+    sy, sx, dy, dx = data_4D.shape
 
-#         Q_new = (G.T @ Z) / N - (
-#             Gp.mean(dim=0)[:, None] * Q
-#         )
+    X_np = _prepare_matrix(data_4D, nonneg=True)
 
-#         # Symmetric decorrelation:
-#         # Q_new <- (Q_new Q_new.T)^(-1/2) Q_new
-#         U, S, Vh = torch.linalg.svd(Q_new, full_matrices=False)
-#         Q_new = U @ Vh
+    N, M = X_np.shape
+    K = n_components
 
-#         lim = torch.max(torch.abs(torch.abs(torch.diag(Q_new @ Q.T)) - 1)).item()
+    if not isinstance(K, int) or not 1 <= K <= min(N, M):
+        raise ValueError(f'n_components must be between 1 and {min(N, M)}.')
 
-#         Q = Q_new
-
-#         if lim < tol:
-#             break
-
-#     # if not converged:
-#     #     print_and_log('Warning: FastICA did not converge.')
-
-#     # --------------------------------------------------
-#     # 5. Spatial sources and detector-space patterns
-#     # --------------------------------------------------
-#     W = Z @ Q.T
-#     H = Q @ dewhitening.T
-
-#     # Centered reconstruction: X - mean ≈ W @ H
-#     norm_X_sq = 0.0
-#     residual_sq = 0.0
-
-#     mean32 = mean.to(torch.float32)
-#     H32 = H.to(torch.float32)
-#     W32 = W.to(torch.float32)
-
-#     for start in range(0, N, block_size):
-#         end = min(start + block_size, N)
-#         Xb = torch.as_tensor(X_np[start:end], dtype=torch.float32, device=dev)
-#         Xc = Xb - mean32
-#         residual = Xc - W32[start:end] @ H32
-
-#         norm_X_sq += Xc.square().sum().item()
-#         residual_sq += residual.square().sum().item()
-
-#     err = np.sqrt(residual_sq / max(norm_X_sq, 1e-12))
-
-#     print_and_log('')
-#     print_and_log(f'FastICA Stoped at {iteration + 1}th Iteration')
-#     print_and_log(f'ICA Relative Reconstruction Error: {err:.8e}')
-#     print_and_log(f'ICA process finished in {time.perf_counter() - start_time:.2f} s')
-
-#     W = W32.T.reshape(K, sy, sx).cpu().numpy()
-#     H = H32.reshape(K, dy, dx).cpu().numpy()
-
-#     return W, H
-
-
-
-
-def nonnegative_independent_factorization(V, n_components=None, iter_max=1000, lr=1e-2, lambda_ind=0.1, tol=1e-7, device='cpu', random_state=0):
-    import numpy as np
-    import torch
-
-    if device is None:
-        device = 'cpu'
-
-    V = torch.as_tensor(V, dtype=torch.float32, device=device)
-    V = torch.clamp(V, min=0)
-
-    N, M = V.shape
-    R = min(n_components or M, N, M)
-
-    if R < 1:
-        raise ValueError('n_components must be >= 1.')
-
-    eps = 1e-12
-    generator = torch.Generator(device=device)
-    generator.manual_seed(random_state)
-
-    # Positive initialization.
-    S = torch.rand((N, R), generator=generator, device=device) + 0.1
-    A = torch.rand((M, R), generator=generator, device=device) + 0.1
-    S = S.requires_grad_()
-    A = A.requires_grad_()
-
-    optimizer = torch.optim.Adam([S, A], lr=lr)
-    norm_V_sq = V.square().sum().clamp_min(eps)
-    err_list = []
-    previous_loss = None
-
-    for iteration in range(iter_max):
-        optimizer.zero_grad()
-
-        V_hat = S @ A.T
-        loss_recon = (V - V_hat).square().sum() / norm_V_sq
-
-        # Correlation matrix of the nonnegative source components.
-        S_centered = S - S.mean(dim=0, keepdim=True)
-        S_std = S_centered.square().mean(dim=0).sqrt().clamp_min(1e-6)
-        S_norm = S_centered / S_std
-        corr = S_norm.T @ S_norm / N
-
-        off_diag = corr - torch.diag_embed(torch.diagonal(corr))
-        loss_ind = off_diag.square().sum() / max(R * (R - 1), 1)
-
-        loss = loss_recon + lambda_ind * loss_ind
-        loss.backward()
-        optimizer.step()
-
-        with torch.no_grad():
-            # S.clamp_(min=eps)
-            # A.clamp_(min=eps)
-
-            # Fix the scale ambiguity without changing S @ A.T.
-            scale = A.norm(dim=0).clamp_min(eps)
-            A.div_(scale.unsqueeze(0))
-            S.mul_(scale.unsqueeze(0))
-
-            current_recon = (V - S @ A.T).square().sum() / norm_V_sq
-            err = current_recon.sqrt().item()
-            err_list.append(err)
-
-            current_loss = loss.item()
-            if previous_loss is not None:
-                relative_change = abs(previous_loss - current_loss) / max(abs(previous_loss), eps)
-                if relative_change < tol:
-                    break
-            previous_loss = current_loss
-
-    with torch.no_grad():
-        S_out = S.detach().cpu().numpy()
-        A_out = A.detach().cpu().numpy()
-        V_hat = S @ A.T
-        final_err = ((V - V_hat).square().sum() / norm_V_sq).sqrt().item()
-        corr_final = S_norm.T @ S_norm / N
-        if R > 1:
-            mask = ~torch.eye(R, dtype=torch.bool, device=device)
-            mean_abs_corr = corr_final[mask].abs().mean().item()
-        else:
-            mean_abs_corr = 0.0
-
-    print(f'Nonnegative independent factorization: iterations = {len(err_list)}, relative reconstruction error = {final_err:.6e}, mean |correlation| = {mean_abs_corr:.6e}')
-
-    return S_out, A_out, err_list
-
-
-
-
-def fast_hals_NMF_independent(data_4D, n_components, iter_max=500, tol=1e-7, n_block=1, alpha_W=0.0, alpha_H=0.0, l1_ratio=0.0, device='None', independent_target='none', independent_components=None, independent_iter_max=1000, independent_lr=1e-2, lambda_ind=0.1, independent_tol=1e-7, random_state=0):
-
-    if independent_target not in ('none', 'W', 'H', 'both'):
-        raise ValueError("independent_target must be 'none', 'W', 'H', or 'both'.")
+    blocks = BlockedMatrix(X_np, n_block, dev)
+    stats = _block_stats(blocks)
 
     # ----------------------------------------------------
     # Stage 1: NMF
     # ----------------------------------------------------
-    W, H, err_list = fast_hals_NMF(data_4D, n_components, iter_max=iter_max, tol=tol, n_block=n_block, alpha_W=alpha_W, alpha_H=alpha_H, l1_ratio=l1_ratio, device=device)
+    Wt, H, err_list = _hals_nmf_torch(blocks, K, iter_max, tol, n_inner, alpha_W, alpha_H, l1_ratio, stats, random_state=random_state)
 
-    sy, sx, dy, dx = data_4D.shape
-    K = W.shape[0]
-    R = K if independent_components is None else independent_components
+    if independent_target != 'none':
 
-    if independent_target == 'none':
-        return W, H, err_list
+        R = K if independent_components is None else independent_components
 
-    if R < 1:
-        raise ValueError('independent_components must be >= 1.')
+        if not isinstance(R, int) or not 1 <= R <= K:
+            raise ValueError(f'independent_components must be between 1 and {K}.')
 
-    dev = 'cpu' if device is None or device == 'None' else device
+        print_and_log('')
+        print_and_log('################ Nonnegative Independent Factorization ################')
+        print_and_log(f'Independent Target: {independent_target}')
+        print_and_log(f'Independent Components: {R}')
+        print_and_log(f'Rotation Max Iterations: {independent_iter_max}')
+        print_and_log(f'Rotation Initial Step: {independent_lr}')
+        print_and_log(f'Other-side Nonnegativity Weight: {independent_beta}')
+        print_and_log(f'Negativity Tolerance: {independent_neg_tol}')
+        print_and_log(f'Polish Iterations: {independent_polish_iter}')
 
-    # W: (K, sy, sx) -> (sy*sx, K)
-    W_mat = np.ascontiguousarray(W.reshape(K, -1).T, dtype=np.float32)
+        rot_kwargs = dict(n_components=R, beta=independent_beta, neg_tol=independent_neg_tol, iter_max=independent_iter_max, tol=independent_tol, step_init=independent_lr, device=dev)
 
-    # H: (K, dy, dx) -> (dy*dx, K)
-    H_mat = np.ascontiguousarray(H.reshape(K, -1).T, dtype=np.float32)
+        # ----------------------------------------------------
+        # Stage 2: rotate the NMF solution
+        # ----------------------------------------------------
+        if independent_target == 'W':
+            print_and_log(f'Mean |correlation| of W before rotation: {_mean_abs_corr(Wt):.4e}')
 
-    # ----------------------------------------------------
-    # Stage 2A: Nonnegative independent spatial components
-    # W_mat ~= S @ A.T
-    # ----------------------------------------------------
-    if independent_target in ('W', 'both'):
+            # X ~ W0 @ H0 with W0 = Wt.T (N, K)
+            S, H_rot, _ = nonnegative_ica_rotation(Wt.T, H, **rot_kwargs)
 
-        S, A, _ = nonnegative_independent_factorization(W_mat, n_components=R, iter_max=independent_iter_max, lr=independent_lr, lambda_ind=lambda_ind, tol=independent_tol, device=dev, random_state=random_state)
+            Wt = S.T.contiguous().to(dev)
+            H = H_rot.to(dev)
 
-        # W_mat ~= S @ A.T
-        # X ~= S @ A.T @ H_mat.T
-        # Absorb A into the diffraction factors.
-        H_mat = H_mat @ A
-        W_mat = S
+        else:
+            print_and_log(f'Mean |correlation| of H before rotation: {_mean_abs_corr(H):.4e}')
 
-        K = R
+            # X.T ~ H.T @ Wt : the detector patterns play the role of the sources
+            S, W_rot, _ = nonnegative_ica_rotation(H.T, Wt, **rot_kwargs)
 
-    # ----------------------------------------------------
-    # Stage 2B: Nonnegative independent diffraction components
-    # H_mat ~= S @ A.T
-    # ----------------------------------------------------
-    if independent_target in ('H', 'both'):
+            H = S.T.contiguous().to(dev)
+            Wt = W_rot.to(dev)
 
-        S, A, _ = nonnegative_independent_factorization(H_mat, n_components=R, iter_max=independent_iter_max, lr=independent_lr, lambda_ind=lambda_ind, tol=independent_tol, device=dev, random_state=random_state + 1)
+        Wt = Wt.clamp(min=0)
+        H = H.clamp(min=0)
 
-        # H_mat ~= S @ A.T
-        # X ~= W_mat @ A @ S.T
-        W_mat = W_mat @ A
-        H_mat = S
+        # ----------------------------------------------------
+        # Stage 3: polish, keeps both factors strictly nonnegative
+        # ----------------------------------------------------
+        if independent_polish_iter > 0:
+            Wt, H, err_polish = _hals_nmf_torch(blocks, R, independent_polish_iter, tol, n_inner, alpha_W, alpha_H, l1_ratio, stats, init=(Wt, H), label='Polish', random_state=random_state)
+            err_list = err_list + err_polish
 
-        K = R
+        if independent_target == 'W':
+            print_and_log(f'Mean |correlation| of W after rotation: {_mean_abs_corr(Wt):.4e}')
+        else:
+            print_and_log(f'Mean |correlation| of H after rotation: {_mean_abs_corr(H):.4e}')
 
-    # ----------------------------------------------------
-    # Stage 3: Restore original output convention
-    # ----------------------------------------------------
-    W_out = np.ascontiguousarray(W_mat.T.reshape(W_mat.shape[1], sy, sx), dtype=np.float32)
-    H_out = np.ascontiguousarray(H_mat.T.reshape(H_mat.shape[1], dy, dx), dtype=np.float32)
+    K_out = Wt.shape[0]
+
+    W_out = np.ascontiguousarray(Wt.cpu().numpy().reshape(K_out, sy, sx), dtype=np.float32)
+    H_out = np.ascontiguousarray(H.cpu().numpy().reshape(K_out, dy, dx), dtype=np.float32)
 
     print_and_log('')
-    print_and_log('################ Nonnegative Independent Factorization ################')
-    print_and_log(f'Independent Target: {independent_target}')
-    print_and_log(f'Output Components: {W_out.shape[0]}')
+    print_and_log(f'Output Components: {K_out}')
     print_and_log(f'W Output Shape: {W_out.shape}')
     print_and_log(f'H Output Shape: {H_out.shape}')
+
+    _check_output(W_out, H_out, 'INMF')
 
     return W_out, H_out, err_list
