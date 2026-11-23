@@ -18,7 +18,7 @@ Current demonstration modules include:
 - Diffraction pattern rotation estimation
 - Center-of-Mass (CoM) and integrated CoM (iCoM) analysis
 - Virtual detector imaging
-- Simple parallax reconstruction (tcBF)
+- Simple parallax reconstruction (acBF)
 - Ptychographic reconstruction:<br>
     \* analytical WDD and SSB methods<br>
     \* 3D LINV method (https://arxiv.org/abs/2610.15303)<br>
